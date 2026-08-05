@@ -1,0 +1,127 @@
+{
+  "pages": [
+    {
+      "path": "pages/splash/splash",
+      "style": {
+        "navigationStyle": "custom",
+        "disableScroll": true,
+        "mp-weixin": { "navigationStyle": "custom" },
+        "app-plus": { "titleNView": false, "animationType": "fade-in", "background": "#1A6DE5" }
+      }
+    },
+    {
+      "path": "pages/home/home",
+      "style": {
+        "navigationStyle": "custom",
+        "mp-weixin": { "navigationStyle": "custom" },
+        "app-plus": { "titleNView": false, "bounce": "vertical" }
+      }
+    },
+    {
+      "path": "pages/shorts/shorts",
+      "style": {
+        "navigationStyle": "custom",
+        "mp-weixin": { "navigationStyle": "custom" },
+        "app-plus": { "titleNView": false, "bounce": "vertical" }
+      }
+    },
+    {
+      "path": "pages/library/library",
+      "style": {
+        "navigationStyle": "custom",
+        "mp-weixin": { "navigationStyle": "custom" },
+        "app-plus": { "titleNView": false, "bounce": "vertical" }
+      }
+    },
+    {
+      "path": "pages/profile/profile",
+      "style": {
+        "navigationStyle": "custom",
+        "mp-weixin": { "navigationStyle": "custom" },
+        "app-plus": { "titleNView": false }
+      }
+    },
+    {
+      "path": "pages/detail/detail",
+      "style": {
+        "navigationStyle": "custom",
+        "mp-weixin": { "navigationStyle": "custom" },
+        "app-plus": { "titleNView": false, "animationType": "slide-in-right" }
+      }
+    },
+    {
+      "path": "pages/search/search",
+      "style": {
+        "navigationStyle": "custom",
+        "mp-weixin": { "navigationStyle": "custom" },
+        "app-plus": { "titleNView": false, "animationType": "slide-in-right" }
+      }
+    },
+    {
+      "path": "pages/player/player",
+      "style": {
+        "navigationStyle": "custom",
+        "mp-weixin": { "navigationStyle": "custom" },
+        "app-plus": { "titleNView": false, "animationType": "slide-in-bottom" }
+      }
+    },
+    {
+      "path": "pages/history/history",
+      "style": {
+        "navigationStyle": "custom",
+        "mp-weixin": { "navigationStyle": "custom" },
+        "app-plus": { "titleNView": false, "animationType": "slide-in-right" }
+      }
+    },
+    {
+      "path": "pages/favorite/favorite",
+      "style": {
+        "navigationStyle": "custom",
+        "mp-weixin": { "navigationStyle": "custom" },
+        "app-plus": { "titleNView": false, "animationType": "slide-in-right" }
+      }
+    },
+    {
+      "path": "pages/cache/cache",
+      "style": {
+        "navigationStyle": "custom",
+        "mp-weixin": { "navigationStyle": "custom" },
+        "app-plus": { "titleNView": false, "animationType": "slide-in-right" }
+      }
+    },
+    {
+      "path": "pages/about/about",
+      "style": {
+        "navigationStyle": "custom",
+        "mp-weixin": { "navigationStyle": "custom" },
+        "app-plus": { "titleNView": false, "animationType": "slide-in-right" }
+      }
+    },
+    {
+      "path": "pages/legal/agreement",
+      "style": {
+        "navigationStyle": "custom",
+        "mp-weixin": { "navigationStyle": "custom" },
+        "app-plus": { "titleNView": false, "animationType": "slide-in-right" }
+      }
+    },
+    {
+      "path": "pages/legal/privacy",
+      "style": {
+        "navigationStyle": "custom",
+        "mp-weixin": { "navigationStyle": "custom" },
+        "app-plus": { "titleNView": false, "animationType": "slide-in-right" }
+      }
+    }
+  ],
+  "globalStyle": {
+    "navigationBarTextStyle": "white",
+    "navigationBarTitleText": "VIIMK",
+    "navigationBarBackgroundColor": "#0D0D12",
+    "backgroundColor": "#0D0D12",
+    "backgroundTextStyle": "light",
+    "app-plus": {
+      "background": "#0D0D12"
+    }
+  }
+}

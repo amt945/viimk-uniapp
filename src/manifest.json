@@ -1,0 +1,74 @@
+{
+  "name": "VIIMK",
+  "appid": "__UNI__VIIMKAPP",
+  "description": "看见每一部热爱 - VIIMK 短剧视频",
+  "versionName": "1.0.0",
+  "versionCode": "100",
+  "transformPx": false,
+  "app-plus": {
+    "usingComponents": true,
+    "nvueStyleCompiler": "uni-app",
+    "compilerVersion": 3,
+    "splashscreen": {
+      "alwaysShowBeforeRender": true,
+      "waiting": true,
+      "autoclose": true,
+      "delay": 0
+    },
+    "modules": {},
+    "distribute": {
+      "android": {
+        "permissions": [
+          "<uses-permission android:name=\"android.permission.INTERNET\"/>",
+          "<uses-permission android:name=\"android.permission.WRITE_EXTERNAL_STORAGE\"/>",
+          "<uses-permission android:name=\"android.permission.READ_EXTERNAL_STORAGE\"/>",
+          "<uses-permission android:name=\"android.permission.REQUEST_INSTALL_PACKAGES\"/>"
+        ]
+      },
+      "ios": {},
+      "sdkConfigs": {}
+    },
+    "statusbar": {
+      "immersed": "supportedDevice",
+      "style": "dark",
+      "background": "#0D0D12"
+    }
+  },
+  "quickapp": {},
+  "mp-weixin": {
+    "appid": "",
+    "setting": {
+      "urlCheck": false,
+      "es6": true,
+      "postcss": true,
+      "minified": true
+    },
+    "usingComponents": true,
+    "navigationStyle": "custom"
+  },
+  "mp-alipay": {
+    "usingComponents": true,
+    "navigationStyle": "custom"
+  },
+  "h5": {
+    "title": "VIIMK",
+    "router": {
+      "mode": "hash",
+      "base": "./"
+    },
+    "devServer": {
+      "host": "0.0.0.0",
+      "port": 5173
+    },
+    "async": {
+      "loading": "AsyncLoading",
+      "error": "AsyncError",
+      "delay": 200,
+      "timeout": 60000
+    }
+  },
+  "vueVersion": "3",
+  "uniStatistics": {
+    "enable": false
+  }
+}
