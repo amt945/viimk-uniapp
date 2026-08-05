@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Vercel Serverless Functions 入口
-Vercel Python runtime 会自动识别 WSGI app 变量。
+Vercel Python runtime 会自动识别名为 app 的 WSGI 变量。
 """
 
 import sys
@@ -12,4 +12,5 @@ _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
-from server import app  # noqa: F401
+# 直接导入 Flask app，Vercel 会自动识别
+from server import app
