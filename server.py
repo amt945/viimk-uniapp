@@ -22,6 +22,7 @@ VIIMK 视频爬虫后端
   · H5 桌面 Chrome 不原生支持 HLS → /api/player 内置 hls.js 播放页
 """
 
+import os
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -1232,20 +1233,33 @@ def stream():
         resp.headers["Cache-Control"] = "no-cache"
         return resp
 
-    # ts / mp4 / 其它二进制：真正的流式转发（边收边发），减少首字节等待
-    def generate():
-        try:
-            for chunk in upstream.iter_content(chunk_size=64 * 1024):
-                if chunk:
-                    yield chunk
-        finally:
-            try:
-                upstream.close()
-            except Exception:
-                pass
+    # ts / mp4 / 其它二进制：流式转发
+    # Vercel Serverless 不支持 stream_with_context，检测环境降级
+    _is_vercel = os.environ.get("VERCEL") is not None
 
-    resp = Response(stream_with_context(generate()),
-                    content_type=ctype or "application/octet-stream")
+    if _is_vercel:
+        # Vercel 环境：一次性读取全部内容（不适合大文件，但 m3u8/ts 分片通常较小）
+        body = upstream.content
+        try:
+            upstream.close()
+        except Exception:
+            pass
+        resp = Response(body, content_type=ctype or "application/octet-stream")
+    else:
+        # 普通环境：真正的流式转发（边收边发），减少首字节等待
+        def generate():
+            try:
+                for chunk in upstream.iter_content(chunk_size=64 * 1024):
+                    if chunk:
+                        yield chunk
+            finally:
+                try:
+                    upstream.close()
+                except Exception:
+                    pass
+
+        resp = Response(stream_with_context(generate()),
+                        content_type=ctype or "application/octet-stream")
     resp.headers["Access-Control-Allow-Origin"] = "*"
     if "mp4" in ctype or "mp2t" in ctype or is_direct_play_url(raw_url):
         resp.headers["Accept-Ranges"] = "bytes"
