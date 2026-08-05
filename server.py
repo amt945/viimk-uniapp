@@ -472,6 +472,27 @@ def cors_preflight(any_path=None):
     return ("", 204)
 
 
+@app.route("/")
+def root():
+    """根路由 - 返回 API 信息"""
+    return jsonify({
+        "code": 0,
+        "msg": "VIIMK API",
+        "version": "1.0.0",
+        "endpoints": {
+            "health": "/api/health",
+            "search": "/api/search?wd=关键词",
+            "detail": "/api/detail?id=视频ID",
+            "stream": "/api/stream?url=直链",
+            "player": "/api/player?url=直链&title=标题",
+            "categories": "/api/categories",
+            "home": "/api/home",
+            "list": "/api/list?source=ffzy&pg=1",
+            "version": "/api/version",
+        }
+    })
+
+
 @app.route("/api/health")
 def health():
     return jsonify({"code": 0, "msg": "ok", "sites": list(SITES.keys())})
