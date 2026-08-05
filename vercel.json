@@ -1,7 +1,6 @@
 {
   "functions": {
-    "api/[...path].py": {
-      "runtime": "@vercel/python",
+    "app.py": {
       "maxDuration": 60
     }
   }
