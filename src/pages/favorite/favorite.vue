@@ -49,7 +49,7 @@
 <script>
 import StatusBar from '@/components/StatusBar.vue'
 import VmkIcon from '@/components/VmkIcon.vue'
-import { fetchFavoriteList, removeFavorite, navigateToDetail } from '@/api/index.js'
+import { fetchFavoriteList, removeFavorite, navigateToPlayer } from '@/api/index.js'
 
 export default {
   name: 'Favorite',
@@ -76,7 +76,7 @@ export default {
       if (!item) return
       try {
         uni.showLoading({ title: '加载中…', mask: true })
-        await navigateToDetail(item)
+        await navigateToPlayer(item)
       } finally {
         uni.hideLoading()
       }

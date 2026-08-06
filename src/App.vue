@@ -1,16 +1,38 @@
 <script>
 import { checkUpdate } from '@/utils/update.js'
+import { getPyApiBase } from '@/api/request.js'
 
 export default {
   onLaunch() {
     // #ifdef APP-PLUS
-    // App 端沉浸式状态栏
     plus.navigator.setStatusBarStyle('light')
     plus.navigator.setFullscreen(false)
     // #endif
 
+    // 预热云函数：发送轻量请求触发热启动，后续请求可秒开
+    this._warmupApi()
+
     // 启动时检查版本更新
     checkUpdate()
+  },
+  methods: {
+    _warmupApi() {
+      try {
+        const base = getPyApiBase()
+        if (!base) return
+        // 预热多个接口，触发云函数热启动，后续列表/详情/播放请求可秒开
+        const endpoints = ['/api/home', '/api/categories', '/api/shorts?tab=0&pg=1']
+        endpoints.forEach(ep => {
+          uni.request({
+            url: base + ep,
+            method: 'GET',
+            timeout: 5000,
+            success: () => {},
+            fail: () => {}
+          })
+        })
+      } catch (e) {}
+    }
   },
   onShow() {},
   onHide() {}

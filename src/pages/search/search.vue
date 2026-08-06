@@ -124,7 +124,7 @@ import {
   fetchSearchHotWords,
   fetchOnlineSearch,
   fetchShortsSearch,
-  navigateToDetail
+  navigateToPlayer
 } from '@/api/index.js'
 
 const TABS = [
@@ -217,7 +217,7 @@ export default {
       const ct = this.currentTab.key === 'shorts' ? 'shorts' : ''
       try {
         uni.showLoading({ title: '加载中…', mask: true })
-        await navigateToDetail(item, null, ct)
+        await navigateToPlayer(item, null, ct)
       } finally {
         uni.hideLoading()
       }

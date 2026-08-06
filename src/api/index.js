@@ -446,6 +446,38 @@ export async function navigateToDetail(itemOrId, fallbackTitle, contentType) {
   return true
 }
 
+/**
+ * 列表卡片直接跳播放页（跳过详情页）。
+ * 列表卡片点击 → 播放页（player.vue 自身会加载详情+集数）
+ *
+ * 为实现"秒开"，这里不再预先请求 detail（播放页 onLoad 内部会调 fetchOnlineDetail），
+ * 只把 vodId / site / title / contentType 透传给 player，由播放页并行加载。
+ *
+ * @param {Object|string|number} itemOrId
+ * @param {string} [fallbackTitle]
+ * @param {string} [contentType] 'shorts' 表示短剧布局
+ * @returns {Promise<boolean>}
+ */
+export async function navigateToPlayer(itemOrId, fallbackTitle, contentType) {
+  const info = await resolveOnlineItem(itemOrId, fallbackTitle)
+  if (!info || !info.vodId) {
+    uni.showToast({ title: '暂无可播放资源', icon: 'none' })
+    return false
+  }
+  const params = [
+    'vodId=' + encodeURIComponent(info.vodId),
+    'site=' + encodeURIComponent(info.onlineSite),
+    'title=' + encodeURIComponent(info.title || ''),
+    'epIdx=0'
+  ]
+  // 透传列表项的封面，播放页加载详情时可立即显示，提升秒开体感
+  const cover = (typeof itemOrId === 'object' && itemOrId && (itemOrId.cover || itemOrId.pic)) || ''
+  if (cover) params.push('poster=' + encodeURIComponent(cover))
+  if (contentType) params.push('contentType=' + encodeURIComponent(contentType))
+  uni.navigateTo({ url: '/pages/player/player?' + params.join('&') })
+  return true
+}
+
 /* ========================= 搜索 ========================= */
 /**
  * 热搜词
@@ -772,19 +804,41 @@ export function fetchShortsSearch(q) {
  *     lines: [{ index, flag, eps: [{name, url, direct: true/false}] }]
  *   }
  */
+// 详情内存缓存：同一 vodId 5 分钟内复用，避免重复请求（实现秒开）
+const _detailCache = new Map()
+const _detailPromise = new Map()
+const DETAIL_CACHE_MS = 5 * 60 * 1000
+
 export function fetchOnlineDetail(vodId, siteKey) {
   if (!vodId) return Promise.resolve(null)
+  const cacheKey = (siteKey || 'ffzy') + ':' + vodId
+  const now = Date.now()
+  // 1) 值缓存命中
+  const cached = _detailCache.get(cacheKey)
+  if (cached && (now - cached.t) < DETAIL_CACHE_MS) {
+    return Promise.resolve(cached.d)
+  }
+  // 2) in-flight Promise 命中（并发请求合并）
+  if (_detailPromise.has(cacheKey)) {
+    return _detailPromise.get(cacheKey)
+  }
   const params = { id: String(vodId) }
   if (siteKey) params.site = siteKey
-  return onlineRequest('/api/detail', params)
+  const p = onlineRequest('/api/detail', params)
     .then((res) => {
       if (!res || res.code !== 0 || !res.data) return null
+      _detailCache.set(cacheKey, { d: res.data, t: Date.now() })
       return res.data
     })
     .catch((err) => {
       console.warn('[online] detail error', err)
       return null
     })
+    .finally(() => {
+      _detailPromise.delete(cacheKey)
+    })
+  _detailPromise.set(cacheKey, p)
+  return p
 }
 
 /**

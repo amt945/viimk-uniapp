@@ -142,7 +142,7 @@ import {
   fetchHeroBanner,
   fetchHomeCategories,
   fetchHomeList,
-  navigateToDetail
+  navigateToPlayer
 } from '@/api/index.js'
 
 export default {
@@ -337,13 +337,12 @@ export default {
     goLibrary() {
       uni.navigateTo({ url: '/pages/library/library' })
     },
-    // 统一跳转：真实 item(带 onlineSite+vodId) 直接跳 detail.vue；
-    // mock fallback 项先按标题在线搜索再跳 detail.vue，始终进入动态数据页面
+    // 列表卡片直接跳播放页（跳过详情页）
     async goDetail(itemOrId) {
       if (!itemOrId) return
       try {
         uni.showLoading({ title: '加载中…', mask: true })
-        await navigateToDetail(itemOrId)
+        await navigateToPlayer(itemOrId)
       } finally {
         uni.hideLoading()
       }

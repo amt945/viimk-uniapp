@@ -1,5 +1,13 @@
 <template>
-  <view class="player-page" :class="{ 'shorts-mode': isShorts, 'movie-mode': !isShorts }" @tap="onPageTap">
+  <view
+    class="player-page"
+    :class="{ 'shorts-mode': isShorts, 'movie-mode': !isShorts }"
+    @tap="onPageTap"
+    @touchstart="onTouchStart"
+    @touchmove="onTouchMove"
+    @touchend="onTouchEnd"
+    @touchcancel="onTouchEnd"
+  >
     <!-- 视频背景 -->
     <view class="video-bg">
       <!-- 统一使用 H5 video slot（App 端 WebView 也支持） -->
@@ -57,6 +65,19 @@
 
     <!-- ========== 短剧布局（竖屏/短视频风格） ========== -->
     <template v-if="isShorts">
+      <!-- 上下滑动换集提示（轻量常驻） -->
+      <view v-if="!showPanel && !showSpeedMenu && !showMoreMenu" class="swipe-hint" @tap.stop>
+        <view class="swipe-hint-arrows">
+          <view class="swipe-hint-arrow" :class="{ disabled: currentEpIdx <= 0 }">
+            <VmkIcon name="chevron-up" :size="28" color="#FFFFFF" />
+          </view>
+          <text class="swipe-hint-ep">第 {{ currentEpIdx + 1 }} / {{ episodes.length || '?' }} 集</text>
+          <view class="swipe-hint-arrow" :class="{ disabled: currentEpIdx >= episodes.length - 1 }">
+            <VmkIcon name="chevron-down" :size="28" color="#FFFFFF" />
+          </view>
+        </view>
+      </view>
+
       <!-- 顶部控制栏 -->
       <view v-if="showTopBar" class="shorts-top-bar" :style="{ paddingTop: statusBarHeight + 'px' }" @tap.stop>
         <view class="shorts-top-btn" @tap="goBack">
@@ -223,10 +244,18 @@
         </view>
       </view>
 
-      <!-- 中央播放按钮 -->
+      <!-- 中央控制栏：快退 / 播放暂停 / 快进 -->
       <view v-if="showCenterControl" class="center-control movie-center-control" @tap.stop>
+        <view class="center-side-btn" @tap="seekBy(-10)">
+          <VmkIcon name="rewind" :size="56" color="#FFFFFF" />
+          <text class="center-side-label">-10s</text>
+        </view>
         <view class="center-play-btn" @tap="togglePlay">
           <VmkIcon :name="isPlaying ? 'pause' : 'play'" :size="80" color="#FFFFFF" />
+        </view>
+        <view class="center-side-btn" @tap="seekBy(10)">
+          <VmkIcon name="fast-forward" :size="56" color="#FFFFFF" />
+          <text class="center-side-label">+10s</text>
         </view>
       </view>
 
@@ -501,6 +530,11 @@ export default {
       } catch (e) {}
     },
     onPageTap() {
+      // 滑动换集后会触发 tap，这里抑制掉
+      if (this._swipeSuppress) {
+        this._swipeSuppress = false
+        return
+      }
       this.showTopBar = !this.showTopBar
     },
     togglePanel() {
@@ -531,6 +565,92 @@ export default {
       } else {
         v.pause()
       }
+    },
+    // 快进 / 快退（±delta 秒）
+    seekBy(delta) {
+      const v = this._h5Video
+      if (!v || !v.duration) return
+      const target = Math.max(0, Math.min(v.duration, (v.currentTime || 0) + delta))
+      v.currentTime = target
+      this.currentTime = target
+      this._flashControls()
+    },
+    // 短暂显示控制栏（快进/快退反馈）
+    _flashControls() {
+      this.showTopBar = true
+      this.showCenterControl = true
+      if (this._ctrlTimer) clearTimeout(this._ctrlTimer)
+      this._ctrlTimer = setTimeout(() => {
+        if (this.isPlaying) {
+          this.showCenterControl = false
+        }
+      }, 2000)
+    },
+    // ================ 短剧模式：上下滑动换集 ================
+    onTouchStart(e) {
+      if (!this.isShorts) return
+      const t = (e.touches && e.touches[0]) || (e.changedTouches && e.changedTouches[0])
+      if (!t) return
+      this._touchStartX = t.clientX
+      this._touchStartY = t.clientY
+      this._touchStartTime = Date.now()
+      this._touchMoved = false
+    },
+    onTouchMove(e) {
+      if (!this.isShorts) return
+      const t = (e.touches && e.touches[0]) || (e.changedTouches && e.changedTouches[0])
+      if (!t || this._touchStartY == null) return
+      const dy = t.clientY - this._touchStartY
+      const dx = t.clientX - this._touchStartX
+      // 标记是否发生过明显移动（用于区分点击与滑动）
+      if (Math.abs(dy) > 10 || Math.abs(dx) > 10) this._touchMoved = true
+    },
+    onTouchEnd(e) {
+      if (!this.isShorts) return
+      if (this._touchStartY == null) return
+      const t = (e.changedTouches && e.changedTouches[0]) || (e.touches && e.touches[0])
+      const endY = t ? t.clientY : this._touchStartY
+      const endX = t ? t.clientX : this._touchStartX
+      const dy = endY - this._touchStartY
+      const dx = endX - this._touchStartX
+      const dt = Date.now() - (this._touchStartTime || 0)
+      this._touchStartY = null
+      this._touchStartX = null
+      this._touchStartTime = null
+      // 没有明显移动 → 视为点击，交给 onPageTap 处理
+      if (!this._touchMoved) return
+      // 必须以垂直滑动为主（|dy| > |dx|），且超过阈值或速度足够快
+      const SWIPE_THRESHOLD = 60 // 像素
+      const SWIPE_VELOCITY = 0.5  // px/ms
+      const isVertical = Math.abs(dy) > Math.abs(dx)
+      if (!isVertical) return
+      const fast = dt > 0 && (Math.abs(dy) / dt) >= SWIPE_VELOCITY
+      if (Math.abs(dy) < SWIPE_THRESHOLD && !fast) return
+      // 面板打开时不切集（避免误触）
+      if (this.showPanel || this.showSpeedMenu || this.showMoreMenu) return
+      // 抑制紧随其后的 tap 事件（避免误触顶栏）
+      this._swipeSuppress = true
+      if (dy < 0) {
+        // 上滑 → 下一集
+        this._swipeEpisode(1)
+      } else {
+        // 下滑 → 上一集
+        this._swipeEpisode(-1)
+      }
+    },
+    _swipeEpisode(dir) {
+      const next = this.currentEpIdx + dir
+      if (next < 0) {
+        uni.showToast({ title: '已经是第一集了', icon: 'none' })
+        return
+      }
+      if (next >= this.episodes.length) {
+        uni.showToast({ title: '已经是最后一集了', icon: 'none' })
+        return
+      }
+      // 切集时给出视觉反馈
+      uni.showToast({ title: dir > 0 ? '下一集' : '上一集', icon: 'none', duration: 600 })
+      this.selectEpisode(next)
     },
     // 进度条：格式化时间 00:00
     _formatTime(s) {
@@ -991,7 +1111,7 @@ export default {
   object-fit: cover;
 }
 
-/* ================ 电影/电视剧模式：16:9 视频 + 下方选集 ================ */
+/* ================ 电影/电视剧模式：视频区占页面高度 1/3 + 下方选集 ================ */
 .player-page.movie-mode {
   display: flex;
   flex-direction: column;
@@ -1000,7 +1120,7 @@ export default {
 .movie-mode .video-bg {
   position: relative;
   width: 100%;
-  height: 56.25vw; /* 16:9 比例 */
+  height: 33.3333vh; /* 占页面高度 1/3 */
   flex-shrink: 0;
 }
 .movie-mode .video-el {
@@ -1178,13 +1298,14 @@ export default {
   justify-content: center;
   z-index: 10;
   pointer-events: none;
+  gap: 80rpx;
 }
 .movie-center-control {
   position: absolute;
   top: 0;
   left: 0;
   right: 0;
-  height: 56.25vw; /* 只覆盖 16:9 视频区 */
+  height: 33.3333vh; /* 只覆盖视频区（页面高度 1/3） */
 }
 .center-play-btn {
   width: 120rpx;
@@ -1195,6 +1316,19 @@ export default {
   align-items: center;
   justify-content: center;
   pointer-events: auto;
+}
+.center-side-btn {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4rpx;
+  pointer-events: auto;
+}
+.center-side-label {
+  font-size: 22rpx;
+  color: #FFFFFF;
+  opacity: 0.9;
 }
 
 /* 选集/信息区（视频下方，可滚动） */
@@ -1414,6 +1548,45 @@ export default {
 .shorts-top-sub {
   font-size: 22rpx;
   color: rgba(255, 255, 255, 0.7);
+}
+
+/* 上下滑动换集提示 */
+.swipe-hint {
+  position: absolute;
+  left: 28rpx;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 15;
+  pointer-events: none;
+}
+.swipe-hint-arrows {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16rpx;
+  padding: 20rpx 14rpx;
+  border-radius: 9999px;
+  background-color: rgba(0, 0, 0, 0.32);
+  backdrop-filter: blur(4px);
+}
+.swipe-hint-arrow {
+  width: 48rpx;
+  height: 48rpx;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background-color: rgba(255, 255, 255, 0.14);
+}
+.swipe-hint-arrow.disabled {
+  opacity: 0.3;
+}
+.swipe-hint-ep {
+  font-size: 20rpx;
+  color: #FFFFFF;
+  writing-mode: vertical-rl;
+  letter-spacing: 1rpx;
+  opacity: 0.85;
 }
 
 /* 右侧操作栏 */

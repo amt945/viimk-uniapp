@@ -87,7 +87,7 @@
 import StatusBar from '@/components/StatusBar.vue'
 import BottomNav from '@/components/BottomNav.vue'
 import VmkIcon from '@/components/VmkIcon.vue'
-import { fetchLibraryCategories, fetchLibraryListPaged, navigateToDetail } from '@/api/index.js'
+import { fetchLibraryCategories, fetchLibraryListPaged, navigateToPlayer } from '@/api/index.js'
 
 export default {
   name: 'Library',
@@ -202,7 +202,7 @@ export default {
       if (!itemOrId) return
       try {
         uni.showLoading({ title: '加载中…', mask: true })
-        await navigateToDetail(itemOrId)
+        await navigateToPlayer(itemOrId)
       } finally {
         uni.hideLoading()
       }

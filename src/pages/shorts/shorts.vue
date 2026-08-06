@@ -89,7 +89,7 @@
 import StatusBar from '@/components/StatusBar.vue'
 import BottomNav from '@/components/BottomNav.vue'
 import VmkIcon from '@/components/VmkIcon.vue'
-import { fetchShortsTabs, fetchShortsListPaged, navigateToDetail } from '@/api/index.js'
+import { fetchShortsTabs, fetchShortsListPaged, navigateToPlayer } from '@/api/index.js'
 
 export default {
   name: 'Shorts',
@@ -204,7 +204,7 @@ export default {
       if (!itemOrId) return
       try {
         uni.showLoading({ title: '加载中…', mask: true })
-        await navigateToDetail(itemOrId, null, 'shorts')
+        await navigateToPlayer(itemOrId, null, 'shorts')
       } finally {
         uni.hideLoading()
       }

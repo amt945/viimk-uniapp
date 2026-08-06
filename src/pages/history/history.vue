@@ -67,7 +67,7 @@
 <script>
 import StatusBar from '@/components/StatusBar.vue'
 import VmkIcon from '@/components/VmkIcon.vue'
-import { fetchHistoryList, deleteHistoryItem, clearHistory, navigateToDetail } from '@/api/index.js'
+import { fetchHistoryList, deleteHistoryItem, clearHistory, navigateToPlayer } from '@/api/index.js'
 
 export default {
   name: 'History',
@@ -94,7 +94,7 @@ export default {
       if (!item) return
       try {
         uni.showLoading({ title: '加载中…', mask: true })
-        await navigateToDetail(item)
+        await navigateToPlayer(item)
       } finally {
         uni.hideLoading()
       }
