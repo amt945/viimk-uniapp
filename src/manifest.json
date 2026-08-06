@@ -18,6 +18,13 @@
     "modules": {},
     "distribute": {
       "android": {
+        "icon": {
+          "mdpi": "static/android/mdpi/icon.png",
+          "hdpi": "static/android/hdpi/icon.png",
+          "xhdpi": "static/android/xhdpi/icon.png",
+          "xxhdpi": "static/android/xxhdpi/icon.png",
+          "xxxhdpi": "static/android/xxxhdpi/icon.png"
+        },
         "permissions": [
           "<uses-permission android:name=\"android.permission.INTERNET\"/>",
           "<uses-permission android:name=\"android.permission.WRITE_EXTERNAL_STORAGE\"/>",

@@ -148,16 +148,21 @@ function apiProxyPlugin() {
   }
 }
 
-export default defineConfig({
-  // 代理插件必须放在 uni() 之前：uni 的前置中间件会拦截部分路径
-  plugins: [apiProxyPlugin(), uni()],
-  resolve: {
-    alias: {
-      '@': path.resolve(__dirname, 'src')
+export default defineConfig(({ mode }) => {
+  const isDevH5 = mode === 'development'
+  return {
+    plugins: [
+      ...(isDevH5 ? [apiProxyPlugin()] : []),
+      uni()
+    ],
+    resolve: {
+      alias: {
+        '@': path.resolve(__dirname, 'src')
+      }
+    },
+    server: {
+      host: '0.0.0.0',
+      port: 5173
     }
-  },
-  server: {
-    host: '0.0.0.0',
-    port: 5173
   }
 })
