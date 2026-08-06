@@ -48,7 +48,7 @@ export const TOKEN_KEY = 'viimk_token'
  */
 
 // ========= 可部署的远端服务：App / 小程序打包前把这一行改成自己的域名 ========
-const REMOTE_BASE = ''          // TODO: 改成自己部署的 HTTPS 域名，例如 'https://viimk-api.example.com'
+const REMOTE_BASE = 'https://1302446649-7terr1rghd.ap-guangzhou.tencentscf.com'
 // ==========================================================================
 
 // 本地调试/内网离线模式（真机调 App 且电脑开热点时可填电脑局域网 IP）
