@@ -978,10 +978,30 @@ _NATIVE_PAGE_CACHE = {}
 _NATIVE_PAGE_TTL = 90
 
 
+def _is_shorts_item(it):
+    """判断单条数据是否为真短剧：genre/tag/remarks/title 任一含"短剧"关键字。
+    format_item 里 genre = vod.type_name，tag 字段若未单独返回则用空串兜底。
+    """
+    if not it:
+        return False
+    g = (it.get("genre") or "").strip()
+    tag = (it.get("tag") or "").strip()
+    rmk = (it.get("remarks") or "").strip()
+    title = (it.get("title") or "").strip()
+    return ("短剧" in g) or ("短剧" in tag) or ("短剧" in rmk) or ("短剧" in title)
+
+
 def _fetch_native_cached(t, native_pg, wd=None):
     """带缓存的列表页拉取（主源 ffzy + 自动故障切换），返回 (items, pagecount, total)
     wd: 关键词搜索（短剧题材筛选用，与 t 组合）
     缓存命中时直接返回；未命中时走 fetch_list_with_failover，主源失败自动切备源。
+
+    针对 t==36（短剧分类）额外处理：
+      1. 无论使用哪个源，一律按"短剧"关键字严格过滤，避免 wuj/lzi 等备源 t=36
+         映射到邵氏电影、体育等非短剧分类（各采集站 type_id 定义不一致）。
+      2. 过滤后仍有结果：使用过滤结果 + 为每一项打 contentType='shorts' 标记。
+      3. 过滤后为空：直接单独请求 ffzy2（cj.ffzyapi.com，t=36 确实是短剧）兜底，
+         再执行一次同样的过滤规则。
     """
     key = (t, native_pg, wd)
     import time as _tm
@@ -995,6 +1015,57 @@ def _fetch_native_cached(t, native_pg, wd=None):
     )
     if used_key and used_key != "ffzy":
         print(f"[native-cache] 主源 ffzy 不可用，本页由 {used_key} 提供", flush=True)
+
+    # ---- 短剧分类严格过滤 + 兜底 ----
+    if t == 36 and items:
+        filtered = [it for it in items if _is_shorts_item(it)]
+        kept = len(filtered)
+        non_shorts = len(items) - kept
+        if non_shorts > 0:
+            print(
+                f"[native-cache] t=36 过滤非短剧 {non_shorts}/{len(items)} 条 "
+                f"(used_key={used_key}, wd={wd!r})",
+                flush=True,
+            )
+        if filtered:
+            items = filtered
+            total = kept  # 不写 pagecount（无法可靠估算），让调用方按实际条数判断
+        else:
+            # 全部被过滤掉 → 尝试 ffzy2 源单独兜底
+            print(
+                f"[native-cache] t=36 {used_key} 全为非短剧数据，尝试 ffzy2 兜底",
+                flush=True,
+            )
+            try:
+                f2_items, f2_pc, f2_total = fetch_site_list(
+                    "ffzy2", t=36, pg=native_pg, wd=wd
+                )
+                f2_filtered = [it for it in f2_items if _is_shorts_item(it)]
+                f2_non_shorts = len(f2_items) - len(f2_filtered)
+                if f2_non_shorts:
+                    print(
+                        f"[native-cache] ffzy2 兜底再次过滤非短剧 "
+                        f"{f2_non_shorts}/{len(f2_items)} 条",
+                        flush=True,
+                    )
+                if f2_filtered:
+                    items = f2_filtered
+                    pagecount = f2_pc
+                    total = len(f2_filtered)
+                    used_key = "ffzy2"
+                else:
+                    items = []
+                    total = 0
+                    print("[native-cache] ffzy2 兜底仍无非短剧数据，返回空", flush=True)
+            except Exception as e2:
+                print(f"[native-cache] ffzy2 兜底异常: {e2}", flush=True)
+                items = []
+                total = 0
+
+        # 对最终保留的短剧条目统一打 contentType='shorts'（便于前端渲染判断）
+        for it in items:
+            it["contentType"] = "shorts"
+
     _NATIVE_PAGE_CACHE[key] = (now, items, pagecount, total)
     return items, pagecount, total
 
