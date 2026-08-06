@@ -103,15 +103,6 @@
         "mp-weixin": { "navigationStyle": "custom" },
         "app-plus": { "titleNView": false, "animationType": "slide-in-right" }
       }
-    },
-    {
-      "path": "pages/splash/splash",
-      "style": {
-        "navigationStyle": "custom",
-        "disableScroll": true,
-        "mp-weixin": { "navigationStyle": "custom" },
-        "app-plus": { "titleNView": false, "animationType": "fade-in", "background": "#1A6DE5" }
-      }
     }
   ],
   "globalStyle": {

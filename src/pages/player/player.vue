@@ -2,25 +2,8 @@
   <view class="player-page" :class="{ 'shorts-mode': isShorts, 'movie-mode': !isShorts }" @tap="onPageTap">
     <!-- 视频背景 -->
     <view class="video-bg">
-      <!-- #ifdef H5 -->
+      <!-- 统一使用 H5 video slot（App 端 WebView 也支持） -->
       <view id="vmk-video-slot" class="video-el" :class="{ 'video-el-shorts': isShorts }"></view>
-      <!-- #endif -->
-      <!-- #ifndef H5 -->
-      <video
-        id="vmk-player-video"
-        class="video-el"
-        :class="{ 'video-el-shorts': isShorts }"
-        :src="nativeSrc"
-        :poster="poster"
-        controls
-        autoplay
-        playsinline
-        webkit-playsinline
-        :object-fit="isShorts ? 'cover' : 'contain'"
-        @loadedmetadata="onLoaded"
-        @error="onVideoError"
-      ></video>
-      <!-- #endif -->
 
       <!-- 加载中 -->
       <view v-if="loading" class="overlay loading-overlay" @tap.stop>
@@ -364,14 +347,7 @@
 import VmkIcon from '@/components/VmkIcon.vue'
 import { fetchOnlineDetail, fetchOnlineResolve, toggleFavorite, isFavorited } from '@/api/index.js'
 
-const IS_H5 = (() => {
-  // #ifdef H5
-  return true
-  // #endif
-  // #ifndef H5
-  return false
-  // #endif
-})()
+const IS_H5 = true  // App 端也是 WebView，统一使用 H5 播放方案
 
 export default {
   name: 'Player',
@@ -379,7 +355,6 @@ export default {
   data() {
     return {
       playTitle: '正在播放',
-      nativeSrc: '',
       poster: '',
       loading: false,
       loadingText: '加载中…',
@@ -796,17 +771,15 @@ export default {
           return
         }
       }
-      if (IS_H5) {
-        this._playH5(m3u8Url)
-      } else {
-        this._playNative(m3u8Url)
-      }
+      // 统一使用 H5/HLS 播放方案（App 端 WebView 也支持）
+      this._playH5(m3u8Url)
     },
     _playH5(m3u8Url) {
       const proxiedUrl = this._toStreamUrl(m3u8Url)
       let video = this._createH5Video()
       this._ensureH5Video()
 
+      // 非 m3u8 直接用 video.src 播放
       if (!proxiedUrl.includes('.m3u8')) {
         video.src = proxiedUrl
         this.loading = false
@@ -818,13 +791,34 @@ export default {
         return
       }
 
+      // m3u8 用 HLS.js 播放
       this._loadHls().then((Hls) => {
-        if (Hls && Hls.isSupported()) {
+        if (!Hls) {
+          this.loading = false
+          this.errMsg = 'HLS 加载失败'
+          return
+        }
+
+        // 如果原生支持 HLS（iOS Safari），直接设 src
+        if (video.canPlayType('application/vnd.apple.mpegurl')) {
+          video.src = proxiedUrl
+          this.loading = false
+          video.addEventListener('loadedmetadata', () => {
+            video.play().catch(() => {
+              this.needTapPlay = true
+            })
+          }, { once: true })
+          return
+        }
+
+        if (Hls.isSupported()) {
           this.destroyHls()
           video = this._createH5Video()
           this._ensureH5Video()
+          // file:// 环境下 Web Worker 不可用，必须禁用
+          const isFileProtocol = typeof window !== 'undefined' && window.location && window.location.protocol === 'file:'
           const hls = new Hls({
-            enableWorker: true,
+            enableWorker: !isFileProtocol,
             lowLatencyMode: false,
             maxBufferLength: 30,
             maxMaxBufferLength: 60,
@@ -847,6 +841,7 @@ export default {
             })
           })
           hls.on(Hls.Events.ERROR, (_, data) => {
+            console.error('[player] HLS error:', data)
             if (data && data.fatal) {
               if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
                 hls.startLoad()
@@ -854,7 +849,7 @@ export default {
                 hls.recoverMediaError()
               } else {
                 this.loading = false
-                this.errMsg = '播放错误'
+                this.errMsg = '播放错误: ' + (data.details || 'unknown')
               }
             }
           })
@@ -862,17 +857,46 @@ export default {
           this.loading = false
           this.errMsg = '当前浏览器不支持 HLS 播放'
         }
-      }).catch(() => {
+      }).catch((err) => {
+        console.error('[player] HLS.js load failed:', err)
         this.loading = false
-        this.errMsg = 'hls.js 加载失败'
+        this.errMsg = '视频解码器加载失败'
       })
     },
     _toStreamUrl(url) {
+      // 非 m3u8/video 格式直接返回
       if (/\.(mp4|flv|ts|mov|mkv|avi|webm)(\?|#|$)/i.test(url)) return url
-      const base = '/__pyapi'
+      // 运行时检测：file:// 环境（App WebView）用远程代理，http(s):// 环境用本地代理
+      const REMOTE = 'https://1302446649-7terr1rghd.ap-guangzhou.tencentscf.com'
+      let base
+      if (typeof window !== 'undefined' && window.location && window.location.protocol === 'file:') {
+        // App WebView (file://) — 直连远程流代理
+        base = REMOTE
+      } else if (typeof window !== 'undefined' && window.location && window.location.hostname === 'localhost') {
+        // 本地开发 — 走 Vite 代理
+        base = '/__pyapi'
+      } else {
+        // H5 部署 — 直连远程
+        base = REMOTE
+      }
       return base + '/api/stream?url=' + encodeURIComponent(url) + '&prefix=' + encodeURIComponent(base)
     },
     _loadHls() {
+      // file:// 环境（App WebView）下 import() 不可用，优先用 script 标签加载
+      if (typeof window !== 'undefined' && window.location && window.location.protocol === 'file:') {
+        return new Promise((resolve, reject) => {
+          if (window.Hls) return resolve(window.Hls)
+          const s = document.createElement('script')
+          s.src = './static/hls.min.js'
+          s.onload = () => {
+            if (window.Hls) resolve(window.Hls)
+            else reject(new Error('Hls not found after load'))
+          }
+          s.onerror = () => reject(new Error('hls.js script load failed'))
+          document.head.appendChild(s)
+        })
+      }
+      // 正常 web 环境用 ES module
       return import('hls.js').then((m) => m.default || m.Hls || window.Hls).catch(() => {
         return new Promise((resolve, reject) => {
           if (window.Hls) return resolve(window.Hls)
@@ -884,22 +908,16 @@ export default {
         })
       })
     },
-    _playNative(m3u8Url) {
-      this.nativeSrc = m3u8Url
-      this.loading = false
-    },
     destroyHls() {
-      if (IS_H5) {
-        if (this._hls) {
-          try { this._hls.destroy() } catch (e) {}
-          this._hls = null
+      if (this._hls) {
+        try { this._hls.destroy() } catch (e) {}
+        this._hls = null
+      }
+      if (this._h5Video) {
+        if (this._h5Video.parentNode) {
+          this._h5Video.parentNode.removeChild(this._h5Video)
         }
-        if (this._h5Video) {
-          if (this._h5Video.parentNode) {
-            this._h5Video.parentNode.removeChild(this._h5Video)
-          }
-          this._h5Video = null
-        }
+        this._h5Video = null
       }
     },
     selectEpisode(i) {

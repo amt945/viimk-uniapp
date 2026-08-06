@@ -61,16 +61,13 @@ export function setPyApiBase(url) {
 }
 export function getPyApiBase() {
   if (_overrideBase) return _overrideBase
-  // #ifdef H5
-  // H5: 直接连 SCF（CORS 已开启，无需 Vite 代理）
+  // 运行时检测环境（不依赖条件编译，App WebView 也能正确判断）
   if (REMOTE_BASE) return REMOTE_BASE.replace(/\/+$/, '')
-  return '/__pyapi'
-  // #endif
-  // #ifndef H5
-  // 非 H5（App/小程序）：直连远端服务
-  if (REMOTE_BASE) return REMOTE_BASE.replace(/\/+$/, '')
+  // 本地开发走 Vite 代理
+  if (typeof window !== 'undefined' && window.location && window.location.hostname === 'localhost') {
+    return '/__pyapi'
+  }
   return LOCAL_BASE
-  // #endif
 }
 export const PY_API_BASE = getPyApiBase()
 

@@ -1,4 +1,6 @@
 <script>
+import { checkUpdate } from '@/utils/update.js'
+
 export default {
   onLaunch() {
     // #ifdef APP-PLUS
@@ -6,6 +8,9 @@ export default {
     plus.navigator.setStatusBarStyle('light')
     plus.navigator.setFullscreen(false)
     // #endif
+
+    // 启动时检查版本更新
+    checkUpdate()
   },
   onShow() {},
   onHide() {}
