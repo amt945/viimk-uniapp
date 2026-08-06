@@ -67,7 +67,8 @@ function proxyViaHttp(fullUrl, method = 'GET', body = null, reqHeaders = {}) {
       port: u.port || (isHttps ? 443 : 80),
       path: u.pathname + u.search,
       headers,
-      timeout: 60000,
+      timeout: 120000,
+      ...(isHttps ? { rejectUnauthorized: false } : {}),
     }
     const clientReq = lib.request(opts, (res) => {
       const chunks = []

@@ -62,10 +62,12 @@ export function setPyApiBase(url) {
 export function getPyApiBase() {
   if (_overrideBase) return _overrideBase
   // #ifdef H5
+  // H5: 直接连 SCF（CORS 已开启，无需 Vite 代理）
+  if (REMOTE_BASE) return REMOTE_BASE.replace(/\/+$/, '')
   return '/__pyapi'
   // #endif
   // #ifndef H5
-  // 远端服务优先（如果配了 REMOTE_BASE 就直接用）
+  // 非 H5（App/小程序）：直连远端服务
   if (REMOTE_BASE) return REMOTE_BASE.replace(/\/+$/, '')
   return LOCAL_BASE
   // #endif
