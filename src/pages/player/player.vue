@@ -529,6 +529,27 @@ export default {
     if (IS_H5) {
       this.$nextTick(() => this._createH5Video())
     }
+    // 监听原生 Android 返回键触发的退出全屏事件
+    if (typeof window !== 'undefined') {
+      this._onNativeExitFs = () => {
+        if (this.isFullscreen) {
+          this.isFullscreen = false
+          this.showTopBar = true
+        }
+      }
+      window.addEventListener('viimkExitFullscreen', this._onNativeExitFs)
+      window.__vmkExitFullscreen = this._onNativeExitFs
+    }
+  },
+  beforeUnmount() {
+    // 离开播放页前恢复竖屏，避免别的页面也是横屏
+    this._nativeSetOrientation('portrait')
+    if (typeof window !== 'undefined') {
+      window.removeEventListener('viimkExitFullscreen', this._onNativeExitFs)
+      if (window.__vmkExitFullscreen === this._onNativeExitFs) {
+        window.__vmkExitFullscreen = null
+      }
+    }
   },
   updated() {
     if (IS_H5) this._ensureH5Video()
@@ -565,6 +586,14 @@ export default {
   },
   onUnload() {
     this.destroyHls()
+    // 离开页面时强制恢复竖屏
+    this._nativeSetOrientation('portrait')
+    if (typeof window !== 'undefined') {
+      window.removeEventListener('viimkExitFullscreen', this._onNativeExitFs)
+      if (window.__vmkExitFullscreen === this._onNativeExitFs) {
+        window.__vmkExitFullscreen = null
+      }
+    }
   },
   onHide() {
     this.destroyHls()
@@ -811,9 +840,57 @@ export default {
       }
     },
     toggleFullscreen() {
-      // Android WebView 不支持 HTML5 Fullscreen API，使用 CSS 全屏方案
+      // 电影/电视剧 进入全屏 → 横屏；退出 → 竖屏
+      // 短剧默认竖屏，全屏只做 CSS 铺满不切横屏
       this.isFullscreen = !this.isFullscreen
       this.showTopBar = true
+      if (!this.isShorts) {
+        if (this.isFullscreen) {
+          this._nativeSetOrientation('landscape')
+        } else {
+          this._nativeSetOrientation('portrait')
+        }
+      }
+    },
+    /** 调 Android VIIMKAppBridge.setOrientation 切横竖屏
+     *  非原生 WebView（纯 H5 浏览器）时尝试 screen.orientation.lock，不成就静默失败
+     */
+    _nativeSetOrientation(orientation) {
+      const o = orientation || 'portrait'
+      if (typeof window === 'undefined') return
+      // 1) 原生桥：VIIMKAppBridge.setOrientation
+      const bridge = window.VIIMKAppBridge
+      if (bridge && typeof bridge.setOrientation === 'function') {
+        try {
+          bridge.setOrientation(o)
+          return
+        } catch (e) {
+          console.warn('[player] bridge.setOrientation failed:', e)
+        }
+      }
+      // 2) uni-app 云打包端兜底
+      // #ifdef APP-PLUS
+      try {
+        if (o === 'landscape') {
+          plus.screen.lockOrientation('landscape-primary')
+        } else {
+          plus.screen.lockOrientation('portrait-primary')
+        }
+        return
+      } catch (_) {}
+      // #endif
+      // 3) 浏览器端尝试 screen.orientation.lock（需在用户手势里，且移动端多数浏览器不支持，忽略）
+      try {
+        const scr = window.screen
+        if (scr && scr.orientation && typeof scr.orientation.lock === 'function') {
+          const map = {
+            portrait: 'portrait-primary',
+            landscape: 'landscape-primary',
+            unspecified: 'any'
+          }
+          scr.orientation.lock(map[o] || 'any').catch(() => {})
+        }
+      } catch (_) {}
     },
     toggleMute() {
       const v = this._h5Video
@@ -1313,18 +1390,49 @@ export default {
   z-index: 9999;
   background-color: #000;
 }
+/* 电影/电视剧进入横屏全屏时：video 的 object-fit 改为 contain，视频按比例真正铺满 */
+.player-page.movie-mode.fs-active .video-el {
+  object-fit: contain !important;
+  width: 100%;
+  height: 100%;
+}
 .player-page.fs-active .movie-video-controls {
   position: fixed;
   top: 0;
   left: 0;
   right: 0;
-  height: 100%;
+  /* 横屏全屏时控制层要覆盖整个屏幕（不是原来的 1/3 高度） */
+  height: 100vh;
+  height: 100dvh;
   z-index: 10000;
 }
+/* 横屏全屏隐藏右侧换集提示（横屏时用选集栏更直观） */
+.player-page.fs-active .movie-swipe-hint {
+  display: none !important;
+}
+/* 全屏时隐藏简介/选集/系列剧等内容区、短剧底部选集栏、面板 */
 .player-page.fs-active .movie-info-area,
 .player-page.fs-active .shorts-bottom-bar,
-.player-page.fs-active .shorts-panel {
+.player-page.fs-active .shorts-panel,
+.player-page.fs-active .panel-mask {
   display: none !important;
+}
+/* 全屏时面板 Tab、选集、内容区全部隐藏，确保只剩视频 + 控制层 */
+.player-page.fs-active .movie-info-tabs,
+.player-page.fs-active .movie-info-panes {
+  display: none !important;
+}
+/* 横屏时底部控制栏、顶栏在横屏时稍微加大点击区域，避免误触 */
+.player-page.movie-mode.fs-active .movie-bottom-bar {
+  padding-left: calc(24rpx + env(safe-area-inset-left));
+  padding-right: calc(24rpx + env(safe-area-inset-right));
+  padding-bottom: calc(16rpx + env(safe-area-inset-bottom));
+}
+.player-page.movie-mode.fs-active .movie-top-bar {
+  padding-left: calc(24rpx + env(safe-area-inset-left));
+  padding-right: calc(24rpx + env(safe-area-inset-right));
+  padding-top: calc(env(safe-area-inset-top));
+  height: calc(88rpx + env(safe-area-inset-top));
 }
 
 /* ================ 电影/电视剧视频控制层（叠加在 1/3 视频上） ================ */
