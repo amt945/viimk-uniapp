@@ -32,7 +32,7 @@
 
       <!-- 信息 -->
       <view class="card info-card">
-        <view class="info-item">
+        <view class="info-item" @tap="onVersionTap">
           <text class="info-label">版本号</text>
           <text class="info-value">v{{ info.version }}</text>
         </view>
@@ -40,9 +40,15 @@
           <text class="info-label">构建号</text>
           <text class="info-value">{{ info.build }}</text>
         </view>
-        <view class="info-item no-border">
+        <view class="info-item" :class="{ 'no-border': !showActionEntry }">
           <text class="info-label">微信号</text>
           <text class="info-value">QIMAIKE</text>
+        </view>
+        <view v-if="showActionEntry" class="info-item no-border" @tap="goAction">
+          <text class="info-label">动作片</text>
+          <view class="info-arrow">
+            <VmkIcon name="chevron-right" :size="28" color="#9CA3AF" />
+          </view>
         </view>
       </view>
 
@@ -148,6 +154,8 @@ export default {
     return {
       info: { appName: '', slogan: '', version: '', build: '', description: '' },
       aboutMenu: [],
+      versionTapCount: 0,     // 版本号点击计数（5次解锁动作片入口）
+      showActionEntry: false,  // 是否显示动作片入口
       // 更新弹窗状态
       updateDialog: {
         show: false,
@@ -174,6 +182,23 @@ export default {
       const pages = getCurrentPages()
       if (pages.length > 1) uni.navigateBack()
       else uni.redirectTo({ url: '/pages/profile/profile' })
+    },
+    /** 版本号连续点击5次 → 解锁动作片入口 */
+    onVersionTap() {
+      this.versionTapCount++
+      if (this.versionTapCount >= 5 && !this.showActionEntry) {
+        this.showActionEntry = true
+        uni.showToast({ title: '已解锁动作片', icon: 'none' })
+      } else if (this.versionTapCount < 5) {
+        const remain = 5 - this.versionTapCount
+        if (remain <= 2) {
+          uni.showToast({ title: `再点${remain}次解锁`, icon: 'none', duration: 800 })
+        }
+      }
+    },
+    /** 进入动作片列表页 */
+    goAction() {
+      uni.navigateTo({ url: '/pages/action/action' })
     },
     onMenu(item) {
       if (item.id === 'update') {
@@ -433,6 +458,11 @@ export default {
 .info-value {
   font-size: var(--vmk-text-base);
   color: var(--vmk-foreground);
+}
+
+.info-arrow {
+  display: inline-flex;
+  align-items: center;
 }
 
 /* 菜单 */

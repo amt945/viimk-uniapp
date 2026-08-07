@@ -417,6 +417,32 @@ export function fetchLibraryListPaged(cat, pg) {
   }, pg)
 }
 
+/**
+ * 动作片列表分页加载（t=6，ffzy 动作片分类）
+ * 参考 fetchLibraryListPaged，固定 t=6 不走分类映射。
+ * @param {number} pg  页码，从 1 开始
+ * @returns {Promise<{list: Array, hasMore: boolean, page: number}|null>}
+ */
+export function fetchActionListPaged(pg) {
+  const params = { t: 6, pg: pg || 1 }
+  const cacheKey = 'action:' + (pg || 1)
+  return _listRequest(cacheKey, () => {
+    return onlineRequest('/api/list', params)
+      .then((res) => {
+        if (!res || res.code !== 0 || !res.data || !Array.isArray(res.data.list)) return null
+        return {
+          list: res.data.list,
+          hasMore: !!res.data.hasMore,
+          page: res.data.page || pg
+        }
+      })
+      .catch((err) => {
+        console.warn('[online] action list error', err)
+        return null
+      })
+  }, pg)
+}
+
 function mockLibraryList() {
   const all = [..._shortsRecommendList, ..._shortsFollowList]
   return all.map((item, idx) => ({

@@ -81,6 +81,14 @@
       }
     },
     {
+      "path": "pages/action/action",
+      "style": {
+        "navigationStyle": "custom",
+        "mp-weixin": { "navigationStyle": "custom" },
+        "app-plus": { "titleNView": false, "animationType": "slide-in-right" }
+      }
+    },
+    {
       "path": "pages/legal/agreement",
       "style": {
         "navigationStyle": "custom",
