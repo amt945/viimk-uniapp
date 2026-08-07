@@ -48,13 +48,7 @@
                 @tap="goDetail(item)"
               >
                 <view class="thumb-img">
-                  <image
-                    v-if="item.cover"
-                    class="thumb-img-inner"
-                    :src="item.cover"
-                    mode="aspectFill"
-                    @error="onCoverError(item)"
-                  />
+                  <image v-if="item.cover" class="thumb-img-inner" :src="item.cover" mode="aspectFill" @error="onCoverError(item)" />
                   <view v-else class="thumb-img-placeholder">
                     <VmkIcon name="play" :size="36" color="#6B7280" />
                   </view>
@@ -105,12 +99,6 @@ export default {
   },
   async onShow() {
     if (!this.initialized) {
-      if (this._restoreFromStorage()) {
-        this.initialized = true
-        this.loading = false
-        this.loadList(true)
-        return
-      }
       await this.loadList(true)
     } else {
       await this.loadList(true)
@@ -196,9 +184,14 @@ export default {
         this.pagecount = res.pagecount || 1
         this.hasMore = res.hasMore
         this._saveToStorage()
-      } else if (reset && !this.list.length) {
-        // 首屏无缓存且拉取失败 → 显示错误态
-        this.errMsg = '数据加载失败，请检查网络后重试'
+      } else if (reset) {
+        // 首屏请求失败：优先回退到缓存兜底；缓存也没有才显示错误态
+        if (this._restoreFromStorage()) {
+          // 缓存恢复成功，保持 hasMore 让用户能下拉重试
+          this.hasMore = true
+        } else {
+          this.errMsg = '数据加载失败，请检查网络后重试'
+        }
       }
       this.listLoading = false
       this.initialized = true
