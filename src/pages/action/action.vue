@@ -53,6 +53,7 @@
                     class="thumb-img-inner"
                     :src="item.cover"
                     mode="aspectFill"
+                    @error="onCoverError(item)"
                   />
                   <view v-else class="thumb-img-placeholder">
                     <VmkIcon name="play" :size="36" color="#6B7280" />
@@ -118,10 +119,18 @@ export default {
   methods: {
     // 兼容 storage：优先 localStorage（WebView 原生），兜底 uni.storage
     _cacheGet() {
+      // 兼容 storage：优先 localStorage（WebView 原生），兜底 uni.storage
+      // 注意 uni.setStorageSync 在 H5 下会包装为 {type,data} 格式存入 localStorage，
+      // 直接 JSON.parse(localStorage) 会得到包装对象，需取 .data。
       try {
         if (typeof window !== 'undefined' && window.localStorage) {
           const raw = window.localStorage.getItem('vmk_action_cache')
-          if (raw != null) return JSON.parse(raw)
+          if (raw != null) {
+            const parsed = JSON.parse(raw)
+            // uni.storage 包装格式 {type:"object", data:{...}}
+            if (parsed && parsed.type === 'object' && parsed.data) return parsed.data
+            return parsed
+          }
         }
       } catch (e) {}
       try {
@@ -140,11 +149,22 @@ export default {
       } catch (e) {}
       try { if (typeof uni !== 'undefined' && uni.setStorageSync) uni.setStorageSync('vmk_action_cache', data) } catch (e) {}
     },
+    _clearStorage() {
+      try {
+        if (typeof window !== 'undefined' && window.localStorage) {
+          window.localStorage.removeItem('vmk_action_cache')
+        }
+      } catch (e) {}
+      try { if (typeof uni !== 'undefined' && uni.removeStorageSync) uni.removeStorageSync('vmk_action_cache') } catch (e) {}
+    },
     _restoreFromStorage() {
       const cache = this._cacheGet()
       if (!cache || !cache.list || !cache.list.length) return false
       // 缓存超过 6 小时视为过期
       if (cache.t && (Date.now() - cache.t) > 6 * 60 * 60 * 1000) return false
+      // 旧版缓存可能是片库数据（id=online:xxx, 无 url），不是爬虫数据，丢弃
+      const first = cache.list[0]
+      if (first && (first.id || '').indexOf('online:') === 0) return false
       this.list = cache.list
       this.page = cache.page || 1
       this.pagecount = cache.pagecount || 1
@@ -190,6 +210,13 @@ export default {
       // 触底加载下一页
       if (this.hasMore && !this.listLoading) {
         this.loadList(false)
+      }
+    },
+    onCoverError(item) {
+      // 封面加载失败 (如加密图片无法解密) → 清空 cover 触发占位符显示
+      if (item && item.cover) {
+        item.cover = ''
+        if (item.coverUrl) item.coverUrl = ''
       }
     },
     goDetail(item) {

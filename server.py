@@ -1100,30 +1100,69 @@ def _is_encrypted_cover(url):
     return bool(url) and "/enc/" in url
 
 
+def _detect_content_type(img_bytes):
+    """根据图片文件头判断 Content-Type"""
+    if not img_bytes:
+        return "image/jpeg"
+    if img_bytes[:4] == b"RIFF":
+        return "image/webp"
+    if img_bytes[:2] == b"\xff\xd8":
+        return "image/jpeg"
+    if img_bytes[:8] == b"\x89PNG\r\n\x1a\n":
+        return "image/png"
+    return "image/jpeg"
+
+
+def _fetch_direct_cover(cover_url):
+    """直接透传外部图片 URL (非加密), 解决浏览器跨域/沙箱限制。
+    返回 (image_bytes, content_type) 或 None。
+    部分站点 (如 pic.uforxk.cn) 返回加密/混淆的图片数据, 浏览器无法直接显示,
+    检测到无效图片头时返回 None, 让前端显示占位符。
+    """
+    cached = _COVER_CACHE.get(cover_url)
+    if cached and (time.time() - cached[2]) < _COVER_CACHE_TTL:
+        return cached[0], cached[1]
+    try:
+        r = requests.get(cover_url, timeout=15, headers={
+            "User-Agent": "Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36",
+            "Referer": cover_url,
+        })
+        if r.status_code != 200 or not r.content:
+            return None
+        img_bytes = r.content
+        ct = _detect_content_type(img_bytes)
+        # 校验图片头: 加密/混淆数据 (如 pic.uforxk.cn) 头部不匹配任何图片格式
+        if not (img_bytes[:4] == b"RIFF" or img_bytes[:2] == b"\xff\xd8"
+                or img_bytes[:8] == b"\x89PNG\r\n\x1a\n" or img_bytes[:6] == b"GIF89a"
+                or img_bytes[:6] == b"GIF87a"):
+            return None
+        _COVER_CACHE[cover_url] = (img_bytes, ct, time.time())
+        return img_bytes, ct
+    except Exception:
+        return None
+
+
 def _decrypt_cover(cover_url):
-    """解密 yp262 加密封面, 返回 (image_bytes, content_type) 或 None"""
+    """统一封面获取: 加密 URL 走解密, 普通 URL 走透传。
+    返回 (image_bytes, content_type) 或 None。
+    """
     cached = _COVER_CACHE.get(cover_url)
     if cached and (time.time() - cached[2]) < _COVER_CACHE_TTL:
         return cached[0], cached[1]
 
-    # 懒加载 final_crawler (避免循环导入)
-    base_dir = os.path.dirname(os.path.abspath(__file__))
-    if base_dir not in sys.path:
-        sys.path.insert(0, base_dir)
-    from final_crawler import decrypt_cover_url
-
-    img_bytes = decrypt_cover_url(cover_url)
-    if not img_bytes:
-        return None
-
-    if img_bytes[:4] == b"RIFF":
-        ct = "image/webp"
-    elif img_bytes[:2] == b"\xff\xd8":
-        ct = "image/jpeg"
-    elif img_bytes[:8] == b"\x89PNG\r\n\x1a\n":
-        ct = "image/png"
+    if _is_encrypted_cover(cover_url):
+        # yp262 加密封面 → 解密
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        if base_dir not in sys.path:
+            sys.path.insert(0, base_dir)
+        from final_crawler import decrypt_cover_url
+        img_bytes = decrypt_cover_url(cover_url)
+        if not img_bytes:
+            return None
+        ct = _detect_content_type(img_bytes)
     else:
-        ct = "image/jpeg"
+        # 普通外部 URL → 直接透传 (避免浏览器跨域/沙箱拦截)
+        return _fetch_direct_cover(cover_url)
 
     _COVER_CACHE[cover_url] = (img_bytes, ct, time.time())
     return img_bytes, ct
@@ -1131,7 +1170,7 @@ def _decrypt_cover(cover_url):
 
 @app.route("/api/cover_proxy")
 def cover_proxy():
-    """封面代理: 解密 yp262 加密封面并返回图片"""
+    """封面代理: 加密封面解密 / 外部 URL 透传, 解决前端无法直接加载的问题"""
     url = flask_request.args.get("url", "")
     if not url:
         return Response(status=400)
@@ -1168,8 +1207,10 @@ def action_list():
     mapped = []
     for it in page_items:
         cover_url = it.get("pic") or ""
-        # yp262 加密封面 URL → 走 /api/cover_proxy 代理解密
-        if _is_encrypted_cover(cover_url):
+        # 所有外部 http(s) 封面统一走 /api/cover_proxy 代理:
+        #   · yp262 加密封面 → 代理负责解密
+        #   · 普通外部图片   → 代理负责透传 (避免 H5/WebView 沙箱跨域拦截)
+        if cover_url.startswith("http://") or cover_url.startswith("https://"):
             cover_url = "/api/cover_proxy?url=" + quote(cover_url, safe="")
         mapped.append({
             "id": it.get("id") or ("action_" + str(start + len(mapped))),
@@ -1183,10 +1224,12 @@ def action_list():
             "contentType": "action",
             "remarks": it.get("type") or "",
         })
-    return jsonify({"code": 0, "data": {
+    resp = jsonify({"code": 0, "data": {
         "list": mapped, "page": pg, "pagecount": pagecount,
         "total": total, "hasMore": pg < pagecount,
     }})
+    resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+    return resp
 
 
 # 首页"热门推荐"无限滚动：每页固定 6 条（2 行 x 3 列）
