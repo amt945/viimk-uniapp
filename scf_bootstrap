@@ -1,0 +1,41 @@
+#!/bin/bash
+# 腾讯云 SCF Web 函数启动脚本 v6（最简化稳定版）
+# 用 python39 + Flask 内置 server（单线程，最稳）
+
+export PORT=9000
+export TZ=Asia/Shanghai
+export FLASK_ENV=production
+
+# 1. 检测 Python 路径（python39 优先，兼容 CentOS 7）
+PY=""
+for candidate in /var/lang/python39/bin/python3 /var/lang/python37/bin/python3 /var/lang/python3/bin/python3 /var/lang/python310/bin/python3; do
+    if [ -x "$candidate" ]; then
+        PY="$candidate"
+        break
+    fi
+done
+
+if [ -z "$PY" ]; then
+    echo "[SCF] ERROR: no python found"
+    exit 1
+fi
+
+echo "[SCF] Using Python: $PY"
+$PY --version 2>&1
+
+# 2. 依赖搜索路径（zip 内已含 flask/requests/gunicorn）
+export PYTHONPATH="$PWD:$PYTHONPATH"
+
+# 3. 验证依赖能否 import（调试用）
+echo "[SCF] Checking imports..."
+$PY -c "import flask; print('[SCF] flask', flask.__version__)" 2>&1
+$PY -c "import requests; print('[SCF] requests', requests.__version__)" 2>&1
+$PY -c "from server import app; print('[SCF] server.app OK, routes:', len(list(app.url_map.iter_rules())))" 2>&1
+
+# 4. 启动 Flask（单进程单线程，最稳，避开 threaded 引发的连接重置）
+echo "[SCF] Starting Flask server on 0.0.0.0:9000..."
+exec $PY -c "
+import os
+from server import app
+app.run(host='0.0.0.0', port=9000, threaded=False)
+"

@@ -19,7 +19,7 @@ import uni from '@dcloudio/vite-plugin-uni'
  *   /__pyapi  → http://localhost:3001  （Python 爬虫后端，提供搜索/详情 API）
  */
 const PROXY_TARGETS = [
-  { prefix: '/__pyapi', target: 'https://1302446649-7terr1rghd.ap-guangzhou.tencentscf.com' }
+  { prefix: '/__pyapi', target: 'http://localhost:3001' }
 ]
 
 /**

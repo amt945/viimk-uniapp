@@ -1,7 +1,7 @@
 <template>
   <view
     class="player-page"
-    :class="{ 'shorts-mode': isShorts, 'movie-mode': !isShorts }"
+    :class="{ 'shorts-mode': isShorts, 'movie-mode': !isShorts, 'fs-active': isFullscreen }"
     @tap="onPageTap"
     @touchstart="onTouchStart"
     @touchmove="onTouchMove"
@@ -36,31 +36,6 @@
         <text class="overlay-text">点击播放</text>
       </view>
       <!-- #endif -->
-
-      <!-- H5 自定义进度条（App 端用原生 video controls） -->
-      <!-- #ifdef H5 -->
-      <view
-        v-if="showTopBar && !loading && !errMsg"
-        class="player-progress"
-        :class="{ 'shorts-progress': isShorts }"
-        @tap.stop
-      >
-        <text class="progress-time">{{ currentTimeStr }}</text>
-        <view
-          class="progress-track"
-          ref="progressTrack"
-          @tap="onSeekProgress"
-          @touchstart="onSeekStart"
-          @touchmove.prevent="onSeekMove"
-          @touchend="onSeekEnd"
-        >
-          <view class="progress-buffered" :style="{ width: bufferedPercent + '%' }"></view>
-          <view class="progress-played" :style="{ width: playedPercent + '%' }"></view>
-          <view class="progress-thumb" :style="{ left: playedPercent + '%' }"></view>
-        </view>
-        <text class="progress-time">{{ durationStr }}</text>
-      </view>
-      <!-- #endif -->
     </view>
 
     <!-- ========== 短剧布局（竖屏/短视频风格） ========== -->
@@ -78,7 +53,7 @@
         </view>
       </view>
 
-      <!-- 顶部控制栏 -->
+      <!-- 顶部控制栏（参考电影播放器） -->
       <view v-if="showTopBar" class="shorts-top-bar" :style="{ paddingTop: statusBarHeight + 'px' }" @tap.stop>
         <view class="shorts-top-btn" @tap="goBack">
           <VmkIcon name="chevron-left" :size="44" color="#FFFFFF" />
@@ -87,36 +62,49 @@
           <text class="shorts-top-title ellipsis">{{ headerTitle }}</text>
           <text class="shorts-top-sub" v-if="detail && detail.remarks">{{ detail.remarks }}</text>
         </view>
-        <view class="shorts-top-btn" @tap="openMoreMenu">
-          <VmkIcon name="more-vertical" :size="40" color="#FFFFFF" />
+        <view class="shorts-top-actions">
+          <view class="shorts-top-btn" @tap="toggleFavorite">
+            <VmkIcon :name="isFavorited ? 'star-filled' : 'star'" :size="36" :color="isFavorited ? '#FFB800' : '#FFFFFF'" />
+          </view>
+          <view class="shorts-top-btn" @tap="openMoreMenu">
+            <VmkIcon name="more" :size="36" color="#FFFFFF" />
+          </view>
         </view>
       </view>
 
-      <!-- 右侧操作栏 -->
-      <view class="shorts-side-bar" v-if="!showPanel && !showSpeedMenu && !showMoreMenu">
-        <view class="shorts-side-item" @tap="toggleFavorite">
-          <view class="shorts-side-icon-wrap" :class="{ active: isFavorited }">
-            <VmkIcon :name="isFavorited ? 'star-filled' : 'star'" :size="40" :color="isFavorited ? '#FFB800' : '#FFFFFF'" />
-          </view>
-          <text class="shorts-side-label">{{ isFavorited ? '已收藏' : '收藏' }}</text>
+      <!-- 中央：暂停时显示大播放按钮 -->
+      <view v-if="!isPlaying || showCenterControl" class="shorts-center-overlay" @tap.stop>
+        <view v-if="showCenterControl || !isPlaying" class="shorts-center-play-btn" @tap="togglePlay">
+          <VmkIcon :name="isPlaying ? 'pause' : 'play'" :size="72" color="#FFFFFF" />
         </view>
-        <view class="shorts-side-item" @tap="togglePlay">
-          <view class="shorts-side-icon-wrap">
-            <VmkIcon :name="isPlaying ? 'pause' : 'play'" :size="40" color="#FFFFFF" />
-          </view>
-          <text class="shorts-side-label">{{ isPlaying ? '暂停' : '播放' }}</text>
+      </view>
+
+      <!-- 底部控制栏：播放/暂停 + 时间 + 进度条 + 静音 + 倍速 + 全屏（参考电影播放器） -->
+      <view class="shorts-control-bar" v-if="showTopBar && !loading && !errMsg" @tap.stop>
+        <view class="shorts-ctrl-btn" @tap="togglePlay">
+          <VmkIcon :name="isPlaying ? 'pause' : 'play'" :size="28" color="#FFFFFF" />
         </view>
-        <view class="shorts-side-item" @tap="openSpeedMenu">
-          <view class="shorts-side-icon-wrap">
-            <text class="shorts-speed-text">{{ currentSpeed }}x</text>
-          </view>
-          <text class="shorts-side-label">倍速</text>
+        <text class="shorts-ctrl-time">{{ currentTimeStr }}</text>
+        <view
+          class="shorts-progress-track"
+          @tap="onSeekProgress"
+          @touchstart="onSeekStart"
+          @touchmove.prevent="onSeekMove"
+          @touchend="onSeekEnd"
+        >
+          <view class="progress-buffered" :style="{ width: bufferedPercent + '%' }"></view>
+          <view class="progress-played" :style="{ width: playedPercent + '%' }"></view>
+          <view class="progress-thumb" :style="{ left: playedPercent + '%' }"></view>
         </view>
-        <view class="shorts-side-item" @tap="toggleFullscreen">
-          <view class="shorts-side-icon-wrap">
-            <VmkIcon name="fullscreen" :size="40" color="#FFFFFF" />
-          </view>
-          <text class="shorts-side-label">全屏</text>
+        <text class="shorts-ctrl-time">{{ durationStr }}</text>
+        <view class="shorts-ctrl-btn" @tap="toggleMute">
+          <VmkIcon :name="isMuted ? 'volume-off' : 'volume-2'" :size="24" color="#FFFFFF" />
+        </view>
+        <view class="shorts-ctrl-btn" @tap="openSpeedMenu">
+          <text class="shorts-ctrl-speed">{{ currentSpeed }}x</text>
+        </view>
+        <view class="shorts-ctrl-btn" @tap="toggleFullscreen">
+          <VmkIcon :name="isFullscreen ? 'minimize' : 'expand'" :size="24" color="#FFFFFF" />
         </view>
       </view>
 
@@ -208,6 +196,7 @@
               >
                 <image class="series-cover" :src="s.cover" mode="aspectFill" />
                 <text class="series-title ellipsis">{{ s.title }}</text>
+                <text v-if="s.flag" class="series-tag ellipsis">{{ s.flag }}</text>
               </view>
             </view>
             <view class="panel-bottom-spacer"></view>
@@ -221,122 +210,186 @@
       </view>
     </template>
 
-    <!-- ========== 电影/电视剧布局（16:9 视频 + 下方选集） ========== -->
+    <!-- ========== 电影/电视剧布局（1/3 视频 + 控制栏叠加 + 底部选集栏 + 弹出面板） ========== -->
     <template v-else>
-      <!-- 视频区顶部控制栏（叠加在 16:9 视频上） -->
-      <view v-if="showTopBar" class="movie-top-bar" :style="{ paddingTop: statusBarHeight + 'px' }" @tap.stop>
-        <view class="top-btn" @tap="goBack">
-          <VmkIcon name="chevron-left" :size="48" color="#FFFFFF" />
-        </view>
-        <view class="top-title-wrap">
-          <text class="top-title ellipsis">{{ headerTitle }}</text>
-        </view>
-        <view class="top-actions">
-          <view class="top-btn" @tap="openSpeedMenu">
-            <text class="speed-btn-text">{{ currentSpeed }}x</text>
+      <!-- 视频区控制层（叠加在 1/3 视频上） -->
+      <view class="movie-video-controls"
+        @tap.stop
+        @touchstart.stop="onMovieVideoTouchStart"
+        @touchmove.stop="onMovieVideoTouchMove"
+        @touchend.stop="onMovieVideoTouchEnd"
+        @touchcancel.stop="onMovieVideoTouchEnd"
+      >
+        <!-- 顶部栏：返回 + 标题 + 收藏 + 更多 -->
+        <view class="movie-top-bar" :style="{ paddingTop: statusBarHeight + 'px' }" v-if="showTopBar">
+          <view class="top-btn" @tap="goBack">
+            <VmkIcon name="chevron-left" :size="44" color="#FFFFFF" />
           </view>
-          <view class="top-btn" @tap="toggleFullscreen">
-            <VmkIcon name="expand" :size="36" color="#FFFFFF" />
+          <view class="top-title-wrap">
+            <text class="top-title ellipsis">{{ headerTitle }}</text>
           </view>
-          <view class="top-btn" @tap="openMoreMenu">
-            <VmkIcon name="more" :size="40" color="#FFFFFF" />
-          </view>
-        </view>
-      </view>
-
-      <!-- 中央控制栏：快退 / 播放暂停 / 快进 -->
-      <view v-if="showCenterControl" class="center-control movie-center-control" @tap.stop>
-        <view class="center-side-btn" @tap="seekBy(-10)">
-          <VmkIcon name="rewind" :size="56" color="#FFFFFF" />
-          <text class="center-side-label">-10s</text>
-        </view>
-        <view class="center-play-btn" @tap="togglePlay">
-          <VmkIcon :name="isPlaying ? 'pause' : 'play'" :size="80" color="#FFFFFF" />
-        </view>
-        <view class="center-side-btn" @tap="seekBy(10)">
-          <VmkIcon name="fast-forward" :size="56" color="#FFFFFF" />
-          <text class="center-side-label">+10s</text>
-        </view>
-      </view>
-
-      <!-- 选集/信息区（视频下方，可滚动） -->
-      <scroll-view class="movie-content" scroll-y :show-scrollbar="false" @tap.stop="showTopBar = false">
-        <!-- 标题行 -->
-        <view class="movie-title-row" v-if="detail">
-          <text class="movie-title ellipsis">{{ detail.title }}</text>
-          <view class="movie-title-actions">
-            <view v-if="detail.score" class="movie-score">
-              <text class="movie-score-text">{{ detail.score }}</text>
-            </view>
-            <view class="movie-fav-btn" @tap="toggleFavorite">
+          <view class="top-actions">
+            <view class="top-btn" @tap="toggleFavorite">
               <VmkIcon :name="isFavorited ? 'star-filled' : 'star'" :size="36" :color="isFavorited ? '#FFB800' : '#FFFFFF'" />
             </view>
+            <view class="top-btn" @tap="openMoreMenu">
+              <VmkIcon name="more" :size="36" color="#FFFFFF" />
+            </view>
           </view>
         </view>
 
-        <!-- 元信息 -->
-        <view class="movie-meta" v-if="detail">
-          <text class="movie-meta-text" v-if="detail.year">{{ detail.year }}</text>
-          <text class="movie-meta-dot" v-if="detail.year && detail.area">·</text>
-          <text class="movie-meta-text" v-if="detail.area">{{ detail.area }}</text>
-          <text class="movie-meta-dot" v-if="detail.remarks">·</text>
-          <text class="movie-meta-text" v-if="detail.remarks">{{ detail.remarks }}</text>
-          <text class="movie-meta-dot" v-if="episodes.length">·</text>
-          <text class="movie-meta-text" v-if="episodes.length">全{{ episodes.length }}集</text>
-        </view>
-
-        <!-- 演职信息 -->
-        <view class="movie-credits" v-if="detail && (detail.actor || detail.director)">
-          <text class="movie-credit-line" v-if="detail.director">导演：{{ detail.director }}</text>
-          <text class="movie-credit-line" v-if="detail.actor">主演：{{ detail.actor }}</text>
-        </view>
-
-        <!-- 简介 -->
-        <view class="movie-synopsis-section" v-if="detail && detail.content">
-          <text class="movie-section-title">简介</text>
-          <text class="movie-synopsis" :class="{ expanded: synopsisExpanded }">{{ detail.content }}</text>
-          <text class="movie-synopsis-toggle" @tap="synopsisExpanded = !synopsisExpanded">
-            {{ synopsisExpanded ? '收起' : '展开' }}
-          </text>
-        </view>
-
-        <!-- 选集 -->
-        <view class="movie-episodes-section" v-if="episodes.length">
-          <view class="movie-episodes-head">
-            <text class="movie-section-title">选集</text>
-            <text class="movie-episodes-count">共 {{ episodes.length }} 集</text>
+        <!-- 中央：暂停时显示大播放按钮 -->
+        <view v-if="!isPlaying || showCenterControl" class="movie-center-overlay">
+          <view v-if="showCenterControl || !isPlaying" class="movie-center-play-btn" @tap="togglePlay">
+            <VmkIcon :name="isPlaying ? 'pause' : 'play'" :size="72" color="#FFFFFF" />
           </view>
-          <view class="movie-ep-grid">
+        </view>
+
+        <!-- 上下滑动换集提示（多集时显示，轻量常驻） -->
+        <view v-if="episodes.length > 1 && !showSpeedMenu && !showMoreMenu" class="movie-swipe-hint" @tap.stop>
+          <view class="movie-swipe-arrow" :class="{ disabled: currentEpIdx <= 0 }">
+            <VmkIcon name="chevron-up" :size="24" color="#FFFFFF" />
+          </view>
+          <text class="movie-swipe-ep">{{ currentEpIdx + 1 }}/{{ episodes.length }}</text>
+          <view class="movie-swipe-arrow" :class="{ disabled: currentEpIdx >= episodes.length - 1 }">
+            <VmkIcon name="chevron-down" :size="24" color="#FFFFFF" />
+          </view>
+        </view>
+
+        <!-- 底部控制栏：播放/暂停 + 时间 + 进度条 + 倍速 + 静音 + 全屏 -->
+        <view class="movie-bottom-bar" v-if="showTopBar && !loading && !errMsg">
+          <view class="movie-bottom-btn" @tap="togglePlay">
+            <VmkIcon :name="isPlaying ? 'pause' : 'play'" :size="28" color="#FFFFFF" />
+          </view>
+          <text class="movie-bottom-time">{{ currentTimeStr }}</text>
+          <view
+            class="movie-progress-track"
+            ref="progressTrack"
+            @tap="onSeekProgress"
+            @touchstart="onSeekStart"
+            @touchmove.prevent="onSeekMove"
+            @touchend="onSeekEnd"
+          >
+            <view class="progress-buffered" :style="{ width: bufferedPercent + '%' }"></view>
+            <view class="progress-played" :style="{ width: playedPercent + '%' }"></view>
+            <view class="progress-thumb" :style="{ left: playedPercent + '%' }"></view>
+          </view>
+          <text class="movie-bottom-time">{{ durationStr }}</text>
+          <view class="movie-bottom-btn" @tap="toggleMute">
+            <VmkIcon :name="isMuted ? 'volume-off' : 'volume-2'" :size="24" color="#FFFFFF" />
+          </view>
+          <view class="movie-bottom-btn" @tap="openSpeedMenu">
+            <text class="movie-bottom-speed">{{ currentSpeed }}x</text>
+          </view>
+          <view class="movie-bottom-btn" @tap="toggleFullscreen">
+            <VmkIcon :name="isFullscreen ? 'minimize' : 'expand'" :size="24" color="#FFFFFF" />
+          </view>
+        </view>
+      </view>
+
+      <!-- 内容区（视频下方，默认展开，不遮挡播放器） -->
+      <view class="movie-info-area" @tap.stop="showTopBar = false">
+        <!-- Tab 栏 -->
+        <view class="movie-info-tabs">
+          <view
+            v-for="t in panelTabs"
+            :key="t.key"
+            class="movie-info-tab"
+            :class="{ active: panelTab === t.key }"
+            @tap.stop="panelTab = t.key"
+          >
+            <text class="movie-info-tab-text">{{ t.label }}</text>
+          </view>
+        </view>
+
+        <!-- 选集 tab -->
+        <scroll-view v-if="panelTab === 'episodes'" class="movie-info-content" scroll-y :show-scrollbar="false">
+          <view class="ep-grid">
             <view
               v-for="(ep, i) in episodes"
               :key="i"
-              class="movie-ep-item"
+              class="ep-item"
               :class="{ active: currentEpIdx === i }"
-              @tap="selectEpisode(i)"
+              @tap.stop="selectEpisode(i)"
             >
-              <text class="movie-ep-name">{{ ep.name }}</text>
+              <text class="ep-name">{{ ep.name }}</text>
             </view>
           </view>
-        </view>
+          <view class="panel-lines" v-if="detail && detail.lines && detail.lines.length > 1">
+            <text class="panel-lines-title">播放线路</text>
+            <view class="panel-lines-list">
+              <view
+                v-for="(line, li) in detail.lines"
+                :key="li"
+                class="panel-line-chip"
+                :class="{ active: lineIdx === li }"
+                @tap.stop="switchLine(li)"
+              >
+                <text class="panel-line-text">{{ line.flag || ('线路' + (li + 1)) }}</text>
+              </view>
+            </view>
+          </view>
+          <view class="movie-info-spacer"></view>
+        </scroll-view>
 
-        <!-- 播放线路 -->
-        <view class="movie-lines-section" v-if="detail && detail.lines && detail.lines.length > 1">
-          <text class="movie-section-title">播放线路</text>
-          <view class="movie-line-list">
+        <!-- 简介 tab -->
+        <scroll-view v-else-if="panelTab === 'intro'" class="movie-info-content" scroll-y :show-scrollbar="false">
+          <!-- 作品信息（移到简介上方） -->
+          <view class="movie-info-header">
+            <image class="movie-info-cover" :src="detail ? detail.cover : poster" mode="aspectFill" />
+            <view class="movie-info-meta">
+              <view class="movie-info-title-row">
+                <text class="movie-info-title ellipsis">{{ detail ? detail.title : playTitle }}</text>
+                <text v-if="detail && detail.score" class="movie-info-score">{{ detail.score }}</text>
+              </view>
+              <text class="movie-info-subtitle ellipsis">{{ workSubtitle }}</text>
+              <view class="movie-info-actions">
+                <view class="movie-info-fav" @tap.stop="toggleFavorite">
+                  <VmkIcon :name="isFavorited ? 'star-filled' : 'star'" :size="32" :color="isFavorited ? '#FFB800' : '#FFFFFF'" />
+                  <text class="movie-info-fav-text">{{ isFavorited ? '已收藏' : '收藏' }}</text>
+                </view>
+              </view>
+            </view>
+          </view>
+          <view class="panel-credits" v-if="detail && (detail.director || detail.actor)">
+            <text class="panel-credit-line" v-if="detail.director">导演：{{ detail.director }}</text>
+            <text class="panel-credit-line" v-if="detail.actor">主演：{{ detail.actor }}</text>
+          </view>
+          <text class="intro-text">{{ introText }}</text>
+          <view class="panel-lines" v-if="detail && detail.lines && detail.lines.length > 1">
+            <text class="panel-lines-title">播放线路</text>
+            <view class="panel-lines-list">
+              <view
+                v-for="(line, li) in detail.lines"
+                :key="li"
+                class="panel-line-chip"
+                :class="{ active: lineIdx === li }"
+                @tap.stop="switchLine(li)"
+              >
+                <text class="panel-line-text">{{ line.flag || ('线路' + (li + 1)) }}</text>
+              </view>
+            </view>
+          </view>
+          <view class="movie-info-spacer"></view>
+        </scroll-view>
+
+        <!-- 系列剧 tab -->
+        <scroll-view v-else class="movie-info-content" scroll-y :show-scrollbar="false">
+          <view class="series-list">
             <view
-              v-for="(line, i) in detail.lines"
+              v-for="(s, i) in seriesList"
               :key="i"
-              class="movie-line-chip"
-              :class="{ active: lineIdx === i }"
-              @tap="switchLine(i)"
+              class="series-item"
+              @tap="goSeries(s)"
             >
-              <text class="movie-line-chip-text">{{ line.flag || ('线路' + (i + 1)) }}</text>
+              <image class="series-cover" :src="s.cover" mode="aspectFill" />
+              <text class="series-title ellipsis">{{ s.title }}</text>
+              <text v-if="s.flag" class="series-tag ellipsis">{{ s.flag }}</text>
             </view>
           </view>
-        </view>
-
-        <view class="movie-bottom-spacer"></view>
-      </scroll-view>
+          <view class="movie-info-spacer"></view>
+        </scroll-view>
+      </view>
     </template>
 
     <!-- 倍速选择弹窗 -->
@@ -402,8 +455,10 @@ export default {
       _h5Video: null,
       _resolved: false,
       mutedAuto: true,
+      isMuted: true,
       needTapPlay: false,
       isPlaying: false,
+      isFullscreen: false,
       showTopBar: true,
       showCenterControl: false,
       showPanel: false,
@@ -536,6 +591,14 @@ export default {
         return
       }
       this.showTopBar = !this.showTopBar
+      // 显示控制栏时同时显示中央按钮，3 秒后自动隐藏中央按钮
+      if (this.showTopBar) {
+        this.showCenterControl = true
+        clearTimeout(this._centerTimer)
+        this._centerTimer = setTimeout(() => {
+          this.showCenterControl = false
+        }, 3000)
+      }
     },
     togglePanel() {
       this.showPanel = !this.showPanel
@@ -585,6 +648,52 @@ export default {
           this.showCenterControl = false
         }
       }, 2000)
+    },
+    // ================ 电影/电视剧模式：视频区上下滑动换集 ================
+    // 仅在 1/3 视频区域内生效，不影响下方内容区滚动
+    onMovieVideoTouchStart(e) {
+      const t = (e.touches && e.touches[0]) || (e.changedTouches && e.changedTouches[0])
+      if (!t) return
+      this._mvTouchStartX = t.clientX
+      this._mvTouchStartY = t.clientY
+      this._mvTouchStartTime = Date.now()
+      this._mvTouchMoved = false
+    },
+    onMovieVideoTouchMove(e) {
+      const t = (e.touches && e.touches[0]) || (e.changedTouches && e.changedTouches[0])
+      if (!t || this._mvTouchStartY == null) return
+      const dy = t.clientY - this._mvTouchStartY
+      const dx = t.clientX - this._mvTouchStartX
+      if (Math.abs(dy) > 10 || Math.abs(dx) > 10) this._mvTouchMoved = true
+    },
+    onMovieVideoTouchEnd(e) {
+      if (this._mvTouchStartY == null) return
+      const t = (e.changedTouches && e.changedTouches[0]) || (e.touches && e.touches[0])
+      const endY = t ? t.clientY : this._mvTouchStartY
+      const endX = t ? t.clientX : this._mvTouchStartX
+      const dy = endY - this._mvTouchStartY
+      const dx = endX - this._mvTouchStartX
+      const dt = Date.now() - (this._mvTouchStartTime || 0)
+      this._mvTouchStartY = null
+      this._mvTouchStartX = null
+      this._mvTouchStartTime = null
+      // 没有明显移动 → 视为点击，交给 tap 处理（控制栏显隐）
+      if (!this._mvTouchMoved) return
+      // 必须以垂直滑动为主
+      const isVertical = Math.abs(dy) > Math.abs(dx)
+      if (!isVertical) return
+      const SWIPE_THRESHOLD = 60
+      const SWIPE_VELOCITY = 0.5
+      const fast = dt > 0 && (Math.abs(dy) / dt) >= SWIPE_VELOCITY
+      if (Math.abs(dy) < SWIPE_THRESHOLD && !fast) return
+      if (this.showPanel || this.showSpeedMenu || this.showMoreMenu) return
+      // 抑制紧随其后的 tap
+      this._swipeSuppress = true
+      if (dy < 0) {
+        this._swipeEpisode(1)   // 上滑 → 下一集
+      } else {
+        this._swipeEpisode(-1)  // 下滑 → 上一集
+      }
     },
     // ================ 短剧模式：上下滑动换集 ================
     onTouchStart(e) {
@@ -702,11 +811,17 @@ export default {
       }
     },
     toggleFullscreen() {
-      if (this._h5Video && this._h5Video.requestFullscreen) {
-        this._h5Video.requestFullscreen().catch(() => {})
-      } else if (this._h5Video && this._h5Video.webkitRequestFullscreen) {
-        this._h5Video.webkitRequestFullscreen()
-      }
+      // Android WebView 不支持 HTML5 Fullscreen API，使用 CSS 全屏方案
+      this.isFullscreen = !this.isFullscreen
+      this.showTopBar = true
+    },
+    toggleMute() {
+      const v = this._h5Video
+      if (!v) return
+      v.muted = !v.muted
+      this.isMuted = v.muted
+      this.mutedAuto = v.muted
+      if (!v.muted) v.play().catch(() => {})
     },
     async toggleFavorite() {
       if (!this.vodId) {
@@ -760,22 +875,33 @@ export default {
       video.style.cssText = 'width:100%;height:100%;object-fit:' + fit + ';background:#000;'
       if (this.poster) video.poster = this.poster
       video.addEventListener('click', () => {
+        // 上下滑动换集后会触发 click，这里抑制掉
+        if (this._swipeSuppress) {
+          this._swipeSuppress = false
+          return
+        }
         if (video.muted) {
           video.muted = false
+          this.isMuted = false
           this.mutedAuto = false
           video.play().catch(() => {})
         } else {
-          this.showCenterControl = true
-          setTimeout(() => { this.showCenterControl = false }, 800)
+          this.showTopBar = !this.showTopBar
           this.isPlaying = !video.paused
         }
       })
       video.addEventListener('play', () => { this.isPlaying = true })
       video.addEventListener('pause', () => { this.isPlaying = false })
       video.addEventListener('ratechange', () => {})
+      // 播完自动播放下一集（ended 事件在 HLS.js 暂停/恢复后可能不触发，作兜底）
+      video.addEventListener('ended', () => {
+        this._autoPlayNext()
+      })
       // 进度条：监听时间/时长/缓冲
+      // 同时用 timeupdate 检测接近结尾，触发自动播放下一集（比 ended 更可靠）
       video.addEventListener('timeupdate', () => {
         if (!this._seeking) this.currentTime = video.currentTime || 0
+        this._checkEndedAutoNext()
       })
       video.addEventListener('loadedmetadata', () => {
         this.duration = video.duration || 0
@@ -814,6 +940,14 @@ export default {
           const line = this.currentLine
           this.episodes = (line && line.eps) || []
           this.isFavorited = isFavorited(this.vodId, this.siteKey)
+          // 兜底：URL 未传 contentType 时，根据详情自动识别短剧并修正布局
+          if (!this.contentType && d) {
+            const detailType = (d.contentType || '') + ''
+            const g = (d.genre || d.remarks || d.tag || '') + ''
+            if (detailType === 'shorts' || g.indexOf('短剧') > -1) {
+              this.contentType = 'shorts'
+            }
+          }
         } else {
           this.errMsg = '加载详情失败'
         }
@@ -872,6 +1006,8 @@ export default {
       this.currentTime = 0
       this.duration = 0
       this.buffered = 0
+      // 重置自动播放下一集标志位，允许本次播放结束后再次触发
+      this._autoNextTriggered = false
       let m3u8Url = url
       if (!this._isDirectUrl(url) && !this._resolved) {
         this.loadingText = '解析播放地址…'
@@ -1051,8 +1187,44 @@ export default {
       this.playEpisode(i)
       this.showPanel = false
     },
+    // 播完自动播放下一集（已是最后一集则停留）
+    _autoPlayNext() {
+      if (this._autoNextTriggered) return
+      this._autoNextTriggered = true
+      if (!this.episodes.length) return
+      const next = this.currentEpIdx + 1
+      if (next >= this.episodes.length) {
+        // 最后一集，不自动播放
+        this.isPlaying = false
+        return
+      }
+      this._resolved = false
+      this.needTapPlay = false
+      this.errMsg = ''
+      // 自动续播时取消静音状态，让下一集正常发声
+      const video = this._h5Video
+      if (video && video.muted) {
+        video.muted = false
+        this.isMuted = false
+        this.mutedAuto = false
+      }
+      this.playEpisode(next)
+    },
+    // timeupdate 检测接近结尾，提前触发自动播放下一集（ended 在 HLS 暂停/恢复后常不触发）
+    _checkEndedAutoNext() {
+      const video = this._h5Video
+      if (!video) return
+      // 需要有效时长且非拖拽中
+      if (!this.duration || this.duration <= 0 || this._seeking) return
+      const remaining = this.duration - (video.currentTime || 0)
+      // 剩余不足 0.5 秒视为播完（兼容 HLS 直播流时长不准的情况）
+      if (remaining < 0.5 && video.currentTime > 0) {
+        this._autoPlayNext()
+      }
+    },
     onLoaded() {
       this.loading = false
+      this.showTopBar = true
     },
     onVideoError(e) {
       this.loading = false
@@ -1063,9 +1235,11 @@ export default {
       const video = this._h5Video
       if (!video) return
       video.muted = false
+      this.isMuted = false
       this.mutedAuto = false
       video.play().catch(() => {
         video.muted = true
+        this.isMuted = true
         this.mutedAuto = true
         video.play().catch(() => {})
       })
@@ -1125,6 +1299,194 @@ export default {
 }
 .movie-mode .video-el {
   height: 100%;
+}
+
+/* ================ CSS 全屏模式（兼容 Android WebView） ================ */
+.player-page.fs-active {
+  display: block;
+}
+.player-page.fs-active .video-bg {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 9999;
+  background-color: #000;
+}
+.player-page.fs-active .movie-video-controls {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 100%;
+  z-index: 10000;
+}
+.player-page.fs-active .movie-info-area,
+.player-page.fs-active .shorts-bottom-bar,
+.player-page.fs-active .shorts-panel {
+  display: none !important;
+}
+
+/* ================ 电影/电视剧视频控制层（叠加在 1/3 视频上） ================ */
+.movie-video-controls {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 33.3333vh;
+  z-index: 15;
+  overflow: hidden;
+}
+
+/* 顶部栏（叠加在视频上，带渐变背景） */
+.movie-video-controls .movie-top-bar {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 88rpx;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 24rpx;
+  background: linear-gradient(180deg, rgba(0,0,0,0.75) 0%, transparent 100%);
+  z-index: 20;
+}
+
+/* 中央叠加层：暂停时大按钮，播放时集数信息 */
+.movie-center-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 12;
+  pointer-events: none;
+}
+.movie-center-play-btn {
+  width: 140rpx;
+  height: 140rpx;
+  border-radius: 50%;
+  background-color: rgba(0, 0, 0, 0.55);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: auto;
+}
+/* 电影/电视剧：视频区右侧上下滑动换集提示 */
+.movie-swipe-hint {
+  position: absolute;
+  right: 16rpx;
+  top: 50%;
+  transform: translateY(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6rpx;
+  padding: 14rpx 8rpx;
+  border-radius: 9999rpx;
+  background-color: rgba(0, 0, 0, 0.35);
+  z-index: 13;
+  pointer-events: none;
+}
+.movie-swipe-arrow {
+  opacity: 0.85;
+}
+.movie-swipe-arrow.disabled {
+  opacity: 0.25;
+}
+.movie-swipe-ep {
+  font-size: 20rpx;
+  color: #FFFFFF;
+  line-height: 1;
+}
+.movie-center-episode {
+  pointer-events: none;
+}
+.movie-center-ep-text {
+  font-size: 30rpx;
+  color: #FFFFFF;
+  font-weight: 600;
+  text-shadow: 0 2rpx 12rpx rgba(0, 0, 0, 0.6);
+  max-width: 60%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 底部控制栏（叠加在视频底部） */
+.movie-bottom-bar {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 80rpx;
+  display: flex;
+  align-items: center;
+  padding: 0 16rpx;
+  gap: 10rpx;
+  background: linear-gradient(0deg, rgba(0,0,0,0.75) 0%, transparent 100%);
+  z-index: 20;
+}
+.movie-bottom-btn {
+  width: 64rpx;
+  height: 64rpx;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+.movie-bottom-time {
+  font-size: 22rpx;
+  color: #FFFFFF;
+  font-variant-numeric: tabular-nums;
+  min-width: 72rpx;
+  text-align: center;
+  flex-shrink: 0;
+}
+.movie-bottom-speed {
+  font-size: 26rpx;
+  font-weight: 600;
+  color: #FFFFFF;
+  padding: 6rpx 14rpx;
+  border-radius: 8rpx;
+  background-color: rgba(255, 255, 255, 0.15);
+}
+.movie-progress-track {
+  position: relative;
+  flex: 1;
+  height: 6rpx;
+  border-radius: 3rpx;
+  background-color: rgba(255, 255, 255, 0.25);
+  min-width: 40rpx;
+}
+.movie-progress-track .progress-buffered {
+  position: absolute;
+  left: 0;
+  top: 0;
+  height: 100%;
+  border-radius: 3rpx;
+  background-color: rgba(255, 255, 255, 0.4);
+  transition: width 0.2s;
+}
+.movie-progress-track .progress-played {
+  position: absolute;
+  left: 0;
+  top: 0;
+  height: 100%;
+  border-radius: 3rpx;
+  background-color: #FFB800;
+}
+.movie-progress-track .progress-thumb {
+  position: absolute;
+  top: 50%;
+  width: 22rpx;
+  height: 22rpx;
+  border-radius: 50%;
+  background-color: #FFFFFF;
+  transform: translate(-50%, -50%);
+  box-shadow: 0 0 6rpx rgba(0, 0, 0, 0.5);
+  pointer-events: none;
 }
 
 /* 通用遮罩层 */
@@ -1247,20 +1609,8 @@ export default {
 }
 
 /* ================ 电影/电视剧布局 ================ */
-/* 视频区顶部控制栏（叠加在 16:9 视频上） */
-.movie-top-bar {
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  height: 88rpx;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 0 24rpx;
-  background: linear-gradient(180deg, rgba(0,0,0,0.6) 0%, transparent 100%);
-  z-index: 20;
-}
+/* 注：顶部栏、中央叠加层、底部控制栏样式见上方 “电影/电视剧视频控制层” 区块 */
+
 .top-btn {
   width: 64rpx;
   height: 64rpx;
@@ -1289,203 +1639,149 @@ export default {
   font-weight: 500;
 }
 
-/* 中央播放按钮（仅覆盖视频区） */
-.center-control {
+/* 内容区（视频下方，默认展开） */
+.movie-info-area {
   position: absolute;
-  inset: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  z-index: 10;
-  pointer-events: none;
-  gap: 80rpx;
-}
-.movie-center-control {
-  position: absolute;
-  top: 0;
+  top: 33.3333vh;
   left: 0;
   right: 0;
-  height: 33.3333vh; /* 只覆盖视频区（页面高度 1/3） */
-}
-.center-play-btn {
-  width: 120rpx;
-  height: 120rpx;
-  border-radius: 50%;
-  background-color: rgba(0, 0, 0, 0.5);
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  pointer-events: auto;
-}
-.center-side-btn {
-  display: inline-flex;
+  bottom: 0;
+  display: flex;
   flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 4rpx;
-  pointer-events: auto;
+  background-color: #0D0D12;
+  overflow: hidden;
 }
-.center-side-label {
-  font-size: 22rpx;
-  color: #FFFFFF;
-  opacity: 0.9;
+.movie-info-header {
+  display: flex;
+  gap: 20rpx;
+  padding: 24rpx 32rpx 16rpx;
+  flex-shrink: 0;
 }
-
-/* 选集/信息区（视频下方，可滚动） */
-.movie-content {
+.movie-info-cover {
+  width: 120rpx;
+  height: 160rpx;
+  border-radius: 12rpx;
+  flex-shrink: 0;
+  background-color: rgba(255, 255, 255, 0.05);
+}
+.movie-info-meta {
   flex: 1;
-  overflow-y: auto;
-  background-color: #1a1a1a;
-  padding: 24rpx 32rpx;
-  padding-bottom: calc(32rpx + env(safe-area-inset-bottom));
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8rpx;
 }
-.movie-title-row {
+.movie-info-title-row {
+  display: flex;
+  align-items: center;
+}
+.movie-info-title {
+  font-size: 34rpx;
+  font-weight: 700;
+  color: #FFFFFF;
+  flex: 1;
+  min-width: 0;
+}
+.movie-info-score {
+  font-size: 28rpx;
+  font-weight: 700;
+  color: #FFB800;
+  margin-left: 12rpx;
+  flex-shrink: 0;
+}
+.movie-info-subtitle {
+  font-size: 24rpx;
+  color: rgba(255, 255, 255, 0.6);
+}
+.movie-info-actions {
   display: flex;
   align-items: center;
   gap: 24rpx;
-  margin-bottom: 16rpx;
+  margin-top: 4rpx;
 }
-.movie-title {
-  flex: 1;
-  min-width: 0;
-  font-size: 36rpx;
-  font-weight: 700;
-  color: #FFFFFF;
-}
-.movie-title-actions {
-  display: flex;
-  align-items: center;
-  gap: 16rpx;
-  flex-shrink: 0;
-}
-.movie-score {
-  height: 44rpx;
-  padding: 0 16rpx;
-  border-radius: 8rpx;
-  background-color: #FFB800;
+.movie-info-fav {
   display: inline-flex;
   align-items: center;
-}
-.movie-score-text {
-  font-size: 24rpx;
-  font-weight: 700;
-  color: #1C1C1E;
-}
-.movie-fav-btn {
-  width: 72rpx;
-  height: 72rpx;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
+  gap: 8rpx;
+  padding: 8rpx 24rpx;
   border-radius: 9999rpx;
   background-color: rgba(255, 255, 255, 0.1);
 }
-.movie-meta {
+.movie-info-fav-text {
+  font-size: 24rpx;
+  color: #FFFFFF;
+}
+.movie-info-tabs {
   display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 8rpx;
-  margin-bottom: 20rpx;
+  gap: 0;
+  padding: 0 32rpx;
+  border-bottom: 1rpx solid rgba(255, 255, 255, 0.08);
+  flex-shrink: 0;
 }
-.movie-meta-text {
-  font-size: 24rpx;
-  color: rgba(255, 255, 255, 0.7);
+.movie-info-tab {
+  padding: 16rpx 0;
+  margin-right: 48rpx;
 }
-.movie-meta-dot {
-  font-size: 24rpx;
-  color: rgba(255, 255, 255, 0.4);
+.movie-info-tab.active {
+  border-bottom: 4rpx solid #FFB800;
 }
-.movie-credits {
+.movie-info-tab-text {
+  font-size: 28rpx;
+  color: rgba(255, 255, 255, 0.5);
+}
+.movie-info-tab.active .movie-info-tab-text {
+  color: #FFFFFF;
+  font-weight: 600;
+}
+.movie-info-content {
+  flex: 1;
+  overflow-y: auto;
+  padding: 24rpx 32rpx;
+}
+/* 简介 tab 内部的 header：抵消 scroll-view 的 padding 保持原视觉效果 */
+.movie-info-content .movie-info-header {
+  padding: 0 0 16rpx;
+}
+.movie-info-spacer {
+  height: calc(32rpx + env(safe-area-inset-bottom));
+}
+.work-score {
+  font-size: 28rpx;
+  font-weight: 700;
+  color: #FFB800;
+  margin-left: 12rpx;
+}
+
+/* 面板内演职信息 */
+.panel-credits {
   display: flex;
   flex-direction: column;
   gap: 8rpx;
   margin-bottom: 24rpx;
 }
-.movie-credit-line {
+.panel-credit-line {
   font-size: 24rpx;
   color: rgba(255, 255, 255, 0.6);
   line-height: 1.5;
 }
-.movie-synopsis-section {
-  margin-bottom: 32rpx;
+
+/* 面板内播放线路 */
+.panel-lines {
+  margin-top: 32rpx;
 }
-.movie-section-title {
+.panel-lines-title {
   display: block;
-  font-size: 30rpx;
-  font-weight: 700;
+  font-size: 28rpx;
+  font-weight: 600;
   color: #FFFFFF;
   margin-bottom: 16rpx;
 }
-.movie-synopsis {
-  font-size: 26rpx;
-  line-height: 1.6;
-  color: rgba(255, 255, 255, 0.7);
-  display: -webkit-box;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 3;
-  overflow: hidden;
-}
-.movie-synopsis.expanded {
-  -webkit-line-clamp: 99;
-}
-.movie-synopsis-toggle {
-  display: inline-block;
-  margin-top: 12rpx;
-  font-size: 26rpx;
-  color: #FFB800;
-}
-.movie-episodes-section {
-  margin-bottom: 32rpx;
-}
-.movie-episodes-head {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  margin-bottom: 20rpx;
-}
-.movie-episodes-head .movie-section-title {
-  margin-bottom: 0;
-}
-.movie-episodes-count {
-  font-size: 24rpx;
-  color: rgba(255, 255, 255, 0.5);
-}
-.movie-ep-grid {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 20rpx;
-}
-.movie-ep-item {
-  min-width: calc((100% - 80rpx) / 5);
-  height: 80rpx;
-  padding: 0 16rpx;
-  border-radius: 12rpx;
-  background-color: rgba(255, 255, 255, 0.08);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-.movie-ep-item.active {
-  background-color: #FFB800;
-}
-.movie-ep-name {
-  font-size: 26rpx;
-  font-weight: 600;
-  color: rgba(255, 255, 255, 0.8);
-}
-.movie-ep-item.active .movie-ep-name {
-  color: #1C1C1E;
-  font-weight: 700;
-}
-.movie-lines-section {
-  margin-bottom: 32rpx;
-}
-.movie-line-list {
+.panel-lines-list {
   display: flex;
   flex-wrap: wrap;
   gap: 16rpx;
 }
-.movie-line-chip {
+.panel-line-chip {
   height: 56rpx;
   padding: 0 28rpx;
   border-radius: 9999rpx;
@@ -1493,19 +1789,16 @@ export default {
   display: inline-flex;
   align-items: center;
 }
-.movie-line-chip.active {
+.panel-line-chip.active {
   background-color: #FFB800;
 }
-.movie-line-chip-text {
+.panel-line-text {
   font-size: 26rpx;
   color: rgba(255, 255, 255, 0.8);
 }
-.movie-line-chip.active .movie-line-chip-text {
+.panel-line-chip.active .panel-line-text {
   color: #1C1C1E;
   font-weight: 600;
-}
-.movie-bottom-spacer {
-  height: 32rpx;
 }
 
 /* ================ 短剧布局（竖屏风格） ================ */
@@ -1589,43 +1882,80 @@ export default {
   opacity: 0.85;
 }
 
-/* 右侧操作栏 */
-.shorts-side-bar {
-  position: absolute;
-  right: 20rpx;
-  bottom: 320rpx;
+/* 顶部右侧操作区 */
+.shorts-top-actions {
   display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 36rpx;
-  z-index: 15;
-}
-.shorts-side-item {
-  display: flex;
-  flex-direction: column;
   align-items: center;
   gap: 8rpx;
+  flex-shrink: 0;
 }
-.shorts-side-icon-wrap {
-  width: 88rpx;
-  height: 88rpx;
+
+/* 中央播放按钮叠加层 */
+.shorts-center-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 12;
+  pointer-events: none;
+}
+.shorts-center-play-btn {
+  width: 140rpx;
+  height: 140rpx;
   border-radius: 50%;
-  background-color: rgba(0, 0, 0, 0.45);
+  background-color: rgba(0, 0, 0, 0.55);
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  pointer-events: auto;
 }
-.shorts-side-icon-wrap.active {
-  background-color: rgba(255, 184, 0, 0.25);
+
+/* 底部控制栏（参考电影播放器） */
+.shorts-control-bar {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: calc(160rpx + env(safe-area-inset-bottom) + 5px);
+  height: 80rpx;
+  display: flex;
+  align-items: center;
+  padding: 0 16rpx;
+  gap: 10rpx;
+  background: linear-gradient(0deg, rgba(0,0,0,0.6) 0%, transparent 100%);
+  z-index: 20;
 }
-.shorts-speed-text {
-  font-size: 28rpx;
+.shorts-ctrl-btn {
+  width: 64rpx;
+  height: 64rpx;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+.shorts-ctrl-time {
+  font-size: 22rpx;
+  color: #FFFFFF;
+  font-variant-numeric: tabular-nums;
+  min-width: 72rpx;
+  text-align: center;
+  flex-shrink: 0;
+}
+.shorts-ctrl-speed {
+  font-size: 26rpx;
   font-weight: 600;
   color: #FFFFFF;
+  padding: 6rpx 14rpx;
+  border-radius: 8rpx;
+  background-color: rgba(255, 255, 255, 0.15);
 }
-.shorts-side-label {
-  font-size: 22rpx;
-  color: rgba(255, 255, 255, 0.85);
+.shorts-progress-track {
+  position: relative;
+  flex: 1;
+  height: 6rpx;
+  border-radius: 3rpx;
+  background-color: rgba(255, 255, 255, 0.25);
+  min-width: 40rpx;
 }
 
 /* 底部选集栏 */
@@ -1865,10 +2195,10 @@ export default {
   gap: 24rpx;
 }
 .series-item {
-  width: calc((100% - 48rpx) / 4);
+  width: calc((100% - 48rpx) / 3);
   display: flex;
   flex-direction: column;
-  gap: 8rpx;
+  gap: 6rpx;
 }
 .series-cover {
   width: 100%;
@@ -1877,8 +2207,14 @@ export default {
   background-color: #333;
 }
 .series-title {
-  font-size: 24rpx;
-  color: rgba(255, 255, 255, 0.8);
+  font-size: 26rpx;
+  font-weight: 600;
+  line-height: 1.3;
+  color: rgba(255, 255, 255, 0.9);
+}
+.series-tag {
+  font-size: 22rpx;
+  color: rgba(255, 255, 255, 0.5);
 }
 
 .panel-bottom-spacer {

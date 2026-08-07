@@ -1,2 +1,13 @@
 flask==2.2.5
+Werkzeug==2.3.8
+Jinja2==3.0.3
+MarkupSafe==2.1.5
+itsdangerous==2.1.2
+click==8.0.4
 requests==2.31.0
+urllib3==1.26.18
+idna==3.6
+charset-normalizer==3.3.2
+certifi==2024.2.2
+gunicorn==21.2.0
+packaging==24.0

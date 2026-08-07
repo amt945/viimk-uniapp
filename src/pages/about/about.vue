@@ -108,6 +108,38 @@
 import StatusBar from '@/components/StatusBar.vue'
 import VmkIcon from '@/components/VmkIcon.vue'
 import { fetchAboutInfo, fetchAboutMenu, fetchAppVersion } from '@/api/index.js'
+import { APP_VERSION } from '@/config/app.js'
+
+/** 运行时判断：是否在 VIIMK 安卓 App 的 WebView 内（非 uni-app 云打包 APP-PLUS） */
+function getAppRuntime() {
+  try {
+    if (typeof window === 'undefined') return { inApp: false }
+    // 1) MainActivity.onPageFinished 注入的全局对象（最可靠）
+    if (window.VIIMK_APP_INFO && window.VIIMK_APP_INFO.inWebView) {
+      return { inApp: true, info: window.VIIMK_APP_INFO }
+    }
+    // 2) JS Bridge 还在但 onPageFinished 没来得及挂 → 主动调一次
+    if (window.VIIMKAppBridge && typeof window.VIIMKAppBridge.getAppInfo === 'function') {
+      try {
+        const raw = window.VIIMKAppBridge.getAppInfo()
+        if (raw) {
+          const parsed = JSON.parse(raw)
+          if (parsed && parsed.inWebView) return { inApp: true, info: parsed }
+        }
+      } catch (_) {}
+    }
+    // 3) UA 兜底：MainActivity 给 UA 追加了 VIIMK-App/<versionName>
+    const ua = (navigator && navigator.userAgent) || ''
+    const m = ua.match(/VIIMK-App\/([^\s]+)/)
+    if (m) {
+      return {
+        inApp: true,
+        info: { platform: 'android', inWebView: true, versionName: m[1] }
+      }
+    }
+  } catch (_) {}
+  return { inApp: false }
+}
 
 export default {
   name: 'About',
@@ -122,12 +154,11 @@ export default {
         versionName: '',
         updateLog: '',
         apkUrl: '',
-        apkUrlType: 'direct',
+        apkUrlType: 'share',
         forceUpdate: false,
         downloading: false,
         progress: 0
-      },
-      _dtask: null   // plus.downloader 实例引用
+      }
     }
   },
   async onShow() {
@@ -155,9 +186,18 @@ export default {
         uni.showToast({ title: item.text, icon: 'none' })
       }
     },
-    /** 检查更新 */
+    /** 检查更新
+     *  支持两种运行时：
+     *  1) VIIMK 安卓 App WebView：通过 window.VIIMK_APP_INFO / VIIMKAppBridge 取本地版本对比
+     *  2) 纯 H5 / 浏览器：提示「请在 App 内检查更新」
+     */
     async checkUpdate() {
-      // #ifdef APP-PLUS
+      const rt = getAppRuntime()
+      if (!rt.inApp) {
+        uni.showToast({ title: '请在 App 内检查更新', icon: 'none' })
+        return
+      }
+
       uni.showLoading({ title: '检查中...', mask: true })
       const v = await fetchAppVersion()
       uni.hideLoading()
@@ -165,17 +205,31 @@ export default {
         uni.showToast({ title: '检查更新失败，请稍后重试', icon: 'none' })
         return
       }
-      const currentCode = parseInt(plus.runtime.versionCode, 10) || 0
+
+      // 取本地 versionCode：优先原生注入 → 兜底 APP_VERSION
+      const info = rt.info || {}
+      let currentCode = parseInt(info.versionCode, 10) || 0
+      if (!currentCode) {
+        currentCode = parseInt(APP_VERSION && APP_VERSION.versionCode, 10) || 0
+      }
       const serverCode = parseInt(v.versionCode, 10) || 0
-      // 低于最低支持版本 → 强制更新
       const forceByMinSupport = currentCode < (parseInt(v.minSupport, 10) || 0)
-      if (serverCode > currentCode) {
+
+      // 原生侧 hasUpdate 兜底判断（逻辑一致，双重保险）
+      let hasNew = serverCode > currentCode
+      if (!hasNew && typeof window !== 'undefined' && window.VIIMKAppBridge
+          && typeof window.VIIMKAppBridge.hasUpdate === 'function') {
+        try { hasNew = !!window.VIIMKAppBridge.hasUpdate(serverCode) } catch (_) {}
+      }
+
+      if (hasNew) {
         this.updateDialog = {
           show: true,
           versionName: v.versionName,
           updateLog: v.updateLog || '优化体验，修复已知问题',
           apkUrl: v.apkUrl,
-          apkUrlType: v.apkUrlType,
+          // 蓝奏云直链经常解析失败，一律走浏览器下载更稳
+          apkUrlType: v.apkUrlType === 'direct' && !v.apkUrl ? 'share' : (v.apkUrlType || 'share'),
           forceUpdate: !!v.forceUpdate || forceByMinSupport,
           downloading: false,
           progress: 0
@@ -183,10 +237,6 @@ export default {
       } else {
         uni.showToast({ title: '已是最新版本', icon: 'none' })
       }
-      // #endif
-      // #ifndef APP-PLUS
-      uni.showToast({ title: '请在 App 内检查更新', icon: 'none' })
-      // #endif
     },
     /** 点遮罩：非强制更新时可关闭 */
     onMaskTap() {
@@ -197,58 +247,41 @@ export default {
     closeUpdateDialog() {
       this.updateDialog.show = false
     },
-    /** 确认更新：开始下载 */
+    /** 确认更新
+     *  WebView + H5 架构：统一用 JS Bridge 调系统浏览器打开下载页（蓝奏云分享页/直链），
+     *  浏览器下载更稳，不会被 WebView 的下载限制卡住。
+     */
     onConfirmUpdate() {
       if (this.updateDialog.downloading) return
-      // #ifdef APP-PLUS
+      const rt = getAppRuntime()
       const url = this.updateDialog.apkUrl
       if (!url) {
         uni.showToast({ title: '下载地址无效', icon: 'none' })
         return
       }
-      // share 类型：无法直接下载，打开系统浏览器
-      if (this.updateDialog.apkUrlType === 'share') {
-        plus.runtime.openURL(url)
-        return
-      }
-      // direct 类型：plus.downloader 下载 + install
-      this.updateDialog.downloading = true
-      this.updateDialog.progress = 0
-      const savePath = '_doc/viimk-update.apk'
-      const dtask = plus.downloader.createDownload(url, { filename: savePath }, (d, status) => {
-        this.updateDialog.downloading = false
-        if (status === 200) {
-          // 安装 APK
-          plus.runtime.install(d.filename, { force: true }, () => {
-            // 安装成功后重启应用
-            plus.runtime.restart()
-          }, (err) => {
-            uni.showModal({
-              title: '安装失败',
-              content: '无法安装更新包，请稍后重试',
-              showCancel: false
-            })
-          })
-        } else {
-          uni.showModal({
-            title: '下载失败',
-            content: '更新包下载失败（状态码 ' + status + '），请稍后重试',
-            showCancel: false
-          })
-        }
-      })
-      // 监听下载进度
-      dtask.addEventListener('statechanged', (task) => {
-        if (task.downloadedSize > 0 && task.totalSize > 0) {
-          const p = Math.floor(task.downloadedSize * 100 / task.totalSize)
-          if (p !== this.updateDialog.progress) {
-            this.updateDialog.progress = p
+
+      // 有原生桥：VIIMKAppBridge.openUrl 走系统浏览器
+      if (rt.inApp && typeof window !== 'undefined' && window.VIIMKAppBridge
+          && typeof window.VIIMKAppBridge.openUrl === 'function') {
+        try {
+          window.VIIMKAppBridge.openUrl(url)
+          // 非强制更新可关闭弹窗
+          if (!this.updateDialog.forceUpdate) {
+            this.closeUpdateDialog()
           }
+          return
+        } catch (e) {
+          console.warn('[update] openUrl bridge failed:', e)
         }
-      })
-      this._dtask = dtask
-      dtask.start()
-      // #endif
+      }
+
+      // 兜底：尝试 location.href / window.open（纯 H5 场景基本无效，尽量让 bridge 走）
+      try {
+        if (window.open) window.open(url, '_blank')
+        else window.location.href = url
+      } catch (_) {
+        uni.showToast({ title: '无法打开下载页，请重试', icon: 'none' })
+      }
     }
   }
 }
@@ -357,6 +390,7 @@ export default {
 /* 简介 */
 .desc-card {
   padding: 32rpx;
+  margin-bottom: 10px;
 }
 
 .desc-title {
@@ -376,6 +410,7 @@ export default {
 /* 信息 */
 .info-card {
   padding: 0 32rpx;
+  margin-bottom: 10px;
 }
 
 .info-item {

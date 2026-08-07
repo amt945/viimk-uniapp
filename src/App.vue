@@ -1,6 +1,13 @@
 <script>
 import { checkUpdate } from '@/utils/update.js'
-import { getPyApiBase } from '@/api/request.js'
+import {
+  fetchHeroBanner,
+  fetchHomeCategories,
+  fetchHomeList,
+  fetchShortsListPaged,
+  fetchLibraryCategories,
+  fetchLibraryListPaged
+} from '@/api/index.js'
 
 export default {
   onLaunch() {
@@ -9,7 +16,7 @@ export default {
     plus.navigator.setFullscreen(false)
     // #endif
 
-    // 预热云函数：发送轻量请求触发热启动，后续请求可秒开
+    // 预热：调用实际 API 函数，结果直接进缓存，页面 onShow 时秒出
     this._warmupApi()
 
     // 启动时检查版本更新
@@ -18,19 +25,14 @@ export default {
   methods: {
     _warmupApi() {
       try {
-        const base = getPyApiBase()
-        if (!base) return
-        // 预热多个接口，触发云函数热启动，后续列表/详情/播放请求可秒开
-        const endpoints = ['/api/home', '/api/categories', '/api/shorts?tab=0&pg=1']
-        endpoints.forEach(ep => {
-          uni.request({
-            url: base + ep,
-            method: 'GET',
-            timeout: 5000,
-            success: () => {},
-            fail: () => {}
-          })
-        })
+        // 调用实际 API 函数（非裸 uni.request），结果进入 API 层内存缓存
+        // 页面 onShow 时命中缓存 → 秒见列表
+        fetchHeroBanner().catch(() => {})
+        fetchHomeCategories().catch(() => {})
+        fetchHomeList('推荐', 1).catch(() => {})
+        fetchShortsListPaged('推荐', 1).catch(() => {})
+        fetchLibraryCategories().catch(() => {})
+        fetchLibraryListPaged('全部', 1).catch(() => {})
       } catch (e) {}
     }
   },

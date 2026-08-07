@@ -33,6 +33,18 @@ from flask import Flask, jsonify, request as flask_request, Response, stream_wit
 
 app = Flask(__name__)
 
+# ============ HTTP 连接池（全局 Session 复用 TCP 连接，大幅减少握手开销）============
+# 每次 requests.get 都新建 TCP+TLS 握手耗时 200-500ms，
+# 用 Session 复用连接池后，同源后续请求几乎零握手成本。
+_SESSION = requests.Session()
+_ADAPTER = requests.adapters.HTTPAdapter(
+    pool_connections=20,      # 连接池大小（同时连接的不同 host 数）
+    pool_maxsize=20,          # 单 host 最大连接数
+    max_retries=0,            # 重试由代码层控制（带 failover），不依赖 urllib3 重试
+)
+_SESSION.mount("http://", _ADAPTER)
+_SESSION.mount("https://", _ADAPTER)
+
 # ============ 采集站配置 ============
 # 多源冗余：ffzy 为主源，其它为备源。搜索/详情自动并发拉取并合并去重；
 # 列表接口在主源失败时自动尝试备源（_fetch_list_with_failover）。
@@ -84,7 +96,8 @@ HEADERS = {
     "Accept-Language": "zh-CN,zh;q=0.9",
 }
 
-TIMEOUT = 10
+TIMEOUT = 5        # 单源请求超时 5s（主源失败时快速切备源，不再死等 10s）
+TIMEOUT_SEARCH = 8  # 搜索需并发多源，给稍长超时
 
 
 # ============ 工具函数 ============
@@ -159,6 +172,9 @@ def format_item(vod, site_key, site_label):
     actor = vod.get("vod_actor", "")
     desc = content or ("主演：" + str(actor) if actor else "")
 
+    # 自动识别短剧类型：genre / tag 含"短剧"即为短剧布局
+    is_shorts = "短剧" in (genre or "") or "短剧" in (remarks or "")
+
     return {
         "id": "online:" + site_key + ":" + str(vod["vod_id"]),
         "onlineSite": site_key,
@@ -176,6 +192,7 @@ def format_item(vod, site_key, site_label):
         "desc": desc,
         "tag": genre or (site_label + "站"),
         "url": "",
+        "contentType": "shorts" if is_shorts else "",
     }
 
 
@@ -190,7 +207,7 @@ def fetch_site_search(site_key, wd, t=None):
             params["t"] = t
         headers = dict(HEADERS)
         headers["Referer"] = site["referer"]
-        resp = requests.get(site["base"], params=params, headers=headers, timeout=20)
+        resp = _SESSION.get(site["base"], params=params, headers=headers, timeout=TIMEOUT_SEARCH)
         data = resp.json()
         raw_list = data.get("list", [])
         if not raw_list and isinstance(data.get("vod"), dict):
@@ -215,7 +232,7 @@ def fetch_site_detail(site_key, vod_id):
         params = {"ac": "detail", "ids": str(vod_id)}
         headers = dict(HEADERS)
         headers["Referer"] = site["referer"]
-        resp = requests.get(site["base"], params=params, headers=headers, timeout=TIMEOUT)
+        resp = _SESSION.get(site["base"], params=params, headers=headers, timeout=TIMEOUT)
         data = resp.json()
         raw_list = data.get("list", [])
         if not raw_list and isinstance(data.get("vod"), dict):
@@ -227,6 +244,10 @@ def fetch_site_detail(site_key, vod_id):
         pic = str(v.get("vod_pic") or v.get("vod_pic_thumb") or v.get("vod_pic_slide") or "").strip()
         cover = ("https:" + pic) if pic.startswith("//") else pic
         lines = parse_lines(v)
+        genre = str(v.get("type_name", "")).strip() if v.get("type_name") else ""
+        remarks = str(v.get("vod_remarks", "")) if v.get("vod_remarks") else ""
+        # 自动识别短剧类型：genre / remarks 含"短剧"即为短剧布局
+        is_shorts = "短剧" in (genre or "") or "短剧" in (remarks or "")
 
         return {
             "onlineSite": site_key,
@@ -236,13 +257,15 @@ def fetch_site_detail(site_key, vod_id):
             "cover": cover,
             "year": str(v.get("vod_year", "")) if v.get("vod_year") else "",
             "area": str(v.get("vod_area", "")) if v.get("vod_area") else "",
+            "genre": genre,
             "actor": str(v.get("vod_actor", "")) if v.get("vod_actor") else "",
             "director": str(v.get("vod_director", "")) if v.get("vod_director") else "",
             "content": re.sub(r"<[^>]+>", "", str(v.get("vod_content", ""))),
-            "remarks": str(v.get("vod_remarks", "")) if v.get("vod_remarks") else "",
+            "remarks": remarks,
             "score": str(v.get("vod_douban_score", "")) if v.get("vod_douban_score") else "",
             "lang": str(v.get("vod_lang", "")) if v.get("vod_lang") else "",
             "lines": lines,
+            "contentType": "shorts" if is_shorts else "",
         }
     except Exception as e:
         print(f"[detail] {site_key} error: {e}")
@@ -280,7 +303,7 @@ def resolve_share_url(share_url):
     try:
         headers = dict(HEADERS)
         headers["Referer"] = guess_referer(share_url)
-        resp = requests.get(share_url, headers=headers, timeout=TIMEOUT)
+        resp = _SESSION.get(share_url, headers=headers, timeout=TIMEOUT)
         if resp.status_code != 200:
             return None
         text = resp.text
@@ -343,7 +366,7 @@ def fetch_site_categories(site_key):
     try:
         headers = dict(HEADERS)
         headers["Referer"] = site["referer"]
-        resp = requests.get(site["base"], params={"ac": "list"},
+        resp = _SESSION.get(site["base"], params={"ac": "list"},
                             headers=headers, timeout=TIMEOUT)
         data = resp.json()
         cls = data.get("class", []) or []
@@ -358,7 +381,8 @@ def fetch_site_categories(site_key):
 def fetch_site_list(site_key, t=None, pg=1, h=None, wd=None):
     """请求采集站视频列表（ac=videolist）
     返回 (items, pagecount, total)
-    沙箱代理偶发 ProxyError，重试 2 次保证分类切换稳定。
+    优化：单次请求 5s 超时，失败仅重试 1 次（原 3 次×10s 最坏 30s）。
+    主源失败由 fetch_list_with_failover 并发切备源兜底，不再靠单源重试硬等。
     wd: 关键词搜索（ffzy 支持 ac=videolist&wd=xxx，可与 t 组合做题材筛选）
     """
     site = SITES.get(site_key)
@@ -374,11 +398,10 @@ def fetch_site_list(site_key, t=None, pg=1, h=None, wd=None):
     headers = dict(HEADERS)
     headers["Referer"] = site["referer"]
 
-    import time as _tm
     last_err = None
-    for attempt in range(3):
+    for attempt in range(2):   # 最多 2 次（首试 + 1 次重试），原为 3 次
         try:
-            resp = requests.get(site["base"], params=params,
+            resp = _SESSION.get(site["base"], params=params,
                                 headers=headers, timeout=TIMEOUT)
             data = resp.json()
             raw_list = data.get("list", []) or []
@@ -394,15 +417,15 @@ def fetch_site_list(site_key, t=None, pg=1, h=None, wd=None):
             return items, pagecount, total
         except Exception as e:
             last_err = e
-            if attempt < 2:
-                _tm.sleep(0.4)
+            if attempt < 1:
+                time.sleep(0.2)   # 缩短重试间隔（原 0.4s）
     print(f"[list] {site_key} error after retries: {last_err}")
     return [], 1, 0
 
 
 def fetch_list_with_failover(t=None, pg=1, h=None, wd=None, prefer_key=None):
-    """列表带故障切换：优先用 prefer_key（默认按 priority 主源），
-    主源失败/空结果时自动按 _LIST_SOURCE_KEYS 顺序尝试备源。
+    """列表带故障切换（并发版）：并发请求多源，谁先返回有效数据用谁。
+    原"串行等待主源超时再切备源"最坏 50s，并发后最坏 = 单源超时 5s。
     返回 (items, pagecount, total, used_site_key)。
     """
     # 构造尝试顺序：prefer_key 优先，其余按 priority
@@ -411,29 +434,42 @@ def fetch_list_with_failover(t=None, pg=1, h=None, wd=None, prefer_key=None):
     else:
         order = list(_LIST_SOURCE_KEYS)
 
-    last_err = None
-    for key in order:
-        try:
-            items, pagecount, total = fetch_site_list(key, t=t, pg=pg, h=h, wd=wd)
-            # 空结果视为失败，继续切下一个源（除非已经是最后一个）
-            if items:
-                return items, pagecount, total, key
-            # 空结果但不报错：记住此源尝试过，继续切换
-            print(f"[list-failover] {key} 返回空，切换下一源", flush=True)
-        except Exception as e:
-            last_err = e
-            print(f"[list-failover] {key} 异常: {e}，切换下一源", flush=True)
+    # 并发请求所有源，谁先返回有效数据就用谁
+    with ThreadPoolExecutor(max_workers=len(order)) as pool:
+        future_map = {
+            pool.submit(fetch_site_list, k, t=t, pg=pg, h=h, wd=wd): k
+            for k in order
+        }
+        results = {}
+        for fut in as_completed(future_map):
+            key = future_map[fut]
+            try:
+                items, pagecount, total = fut.result()
+                if items:
+                    # 拿到第一个有效结果立即返回，cancel 其余任务
+                    for f in future_map:
+                        f.cancel()
+                    return items, pagecount, total, key
+                results[key] = (items, pagecount, total)
+            except Exception as e:
+                print(f"[list-failover] {key} 异常: {e}", flush=True)
+                results[key] = ([], 1, 0)
 
-    # 所有源都失败
-    if last_err:
-        print(f"[list-failover] 所有源均失败: {last_err}", flush=True)
+    # 所有源都返回空或失败：按优先级返回第一个结果（可能是空列表）
+    for key in order:
+        if key in results and results[key][0]:
+            return results[key] + (key,)
+    # 全空，返回主源的空结果
+    if prefer_key and prefer_key in results:
+        return results[prefer_key] + (prefer_key,)
+    if order and order[0] in results:
+        return results[order[0]] + (order[0],)
     return [], 1, 0, None
 
 
 def fetch_detail_with_failover(vod_id, prefer_key=None):
-    """详情多源查找：
-    1. 如果 prefer_key 指定，先查它
-    2. 否则按 priority 顺序逐个尝试，直到返回有效数据
+    """详情多源查找（并发版）：并发请求多源，谁先返回有效数据用谁。
+    原"串行逐个尝试"最坏 50s，并发后最坏 = 单源超时 5s。
     返回 (data, used_site_key) 或 (None, None)。
     """
     if prefer_key and prefer_key in SITES:
@@ -441,17 +477,24 @@ def fetch_detail_with_failover(vod_id, prefer_key=None):
     else:
         order = list(_LIST_SOURCE_KEYS)
 
-    for key in order:
-        try:
-            data = fetch_site_detail(key, vod_id)
-            if data and data.get("lines"):
-                # 更新 site 标识为实际命中的源
-                data["onlineSite"] = key
-                data["onlineSiteLabel"] = SITES[key]["label"]
-                return data, key
-            print(f"[detail-failover] {key} 无有效数据，切换下一源", flush=True)
-        except Exception as e:
-            print(f"[detail-failover] {key} 异常: {e}，切换下一源", flush=True)
+    with ThreadPoolExecutor(max_workers=len(order)) as pool:
+        future_map = {
+            pool.submit(fetch_site_detail, k, vod_id): k
+            for k in order
+        }
+        for fut in as_completed(future_map):
+            key = future_map[fut]
+            try:
+                data = fut.result()
+                if data and data.get("lines"):
+                    # 拿到第一个有效结果立即返回
+                    data["onlineSite"] = key
+                    data["onlineSiteLabel"] = SITES[key]["label"]
+                    for f in future_map:
+                        f.cancel()
+                    return data, key
+            except Exception as e:
+                print(f"[detail-failover] {key} 异常: {e}", flush=True)
     return None, None
 
 
@@ -506,11 +549,11 @@ def health():
 # 注意：VERSION_CONFIG 里的 versionName/versionCode 仍需手动维护，
 # 用于客户端版本对比；updateLog 用于弹窗展示更新日志。
 VERSION_CONFIG = {
-    "versionName": "1.0.0",
-    "versionCode": 100,
-    "updateLog": "首发版本",
-    "forceUpdate": False,    # 是否强制更新
-    "minSupport": 100,       # 低于此 versionCode 强制更新
+    "versionName": "1.0.2",
+    "versionCode": 102,
+    "updateLog": "1. 修复 WebView + H5 架构下检查更新功能\n2. 优化短剧推荐数据过滤\n3. 播放器支持静音/取消静音按钮",
+    "forceUpdate": False,
+    "minSupport": 100,
 }
 # 蓝奏云文件夹分享（自动取最新 APK）
 LANZO_FOLDER_URL = "https://wwbnc.lanzoub.com/b01ve2244f"
@@ -552,7 +595,7 @@ def parse_lanzo_folder(folder_url, pwd=""):
         headers["Referer"] = folder_url
         headers["Accept"] = "text/html,application/xhtml+xml,*/*"
         # 1) GET 文件夹分享页
-        resp = requests.get(folder_url, headers=headers, timeout=15, allow_redirects=True)
+        resp = _SESSION.get(folder_url, headers=headers, timeout=15, allow_redirects=True)
         if resp.status_code != 200:
             return None
         text = resp.text
@@ -604,7 +647,7 @@ def parse_lanzo_folder(folder_url, pwd=""):
         post_headers["Content-Type"] = "application/x-www-form-urlencoded; charset=UTF-8"
         post_headers["X-Requested-With"] = "XMLHttpRequest"
         api_url = host + "/filemoreajax.php?file=" + fid
-        api_resp = requests.post(api_url, data=post_data, headers=post_headers, timeout=15)
+        api_resp = _SESSION.post(api_url, data=post_data, headers=post_headers, timeout=15)
         info = api_resp.json()
         # zt: '1'=成功 '2'=无文件 '3'=密码错误
         if str(info.get("zt", "")) != "1":
@@ -666,7 +709,7 @@ def parse_lanzo_direct(share_url):
         headers = dict(HEADERS)
         headers["Referer"] = share_url
         # 1) 拉分享页，提取 sign / 下页面参数
-        resp = requests.get(share_url, headers=headers, timeout=15, allow_redirects=True)
+        resp = _SESSION.get(share_url, headers=headers, timeout=15, allow_redirects=True)
         if resp.status_code != 200:
             return None
         text = resp.text
@@ -688,7 +731,7 @@ def parse_lanzo_direct(share_url):
             m = re.search(r'<iframe[^>]+src=["\']([^"\']*/fn\?[^"\']+)["\']', text)
             if m:
                 fn_url = urljoin(share_url, m.group(1))
-                resp2 = requests.get(fn_url, headers=headers, timeout=15, allow_redirects=True)
+                resp2 = _SESSION.get(fn_url, headers=headers, timeout=15, allow_redirects=True)
                 text2 = resp2.text
                 m = re.search(r"['\"]sign['\"]\s*[:=]\s*['\"]([^'\"]+)['\"]", text2)
                 if m:
@@ -717,7 +760,7 @@ def parse_lanzo_direct(share_url):
         post_headers = dict(headers)
         post_headers["Content-Type"] = "application/x-www-form-urlencoded"
         post_headers["X-Requested-With"] = "XMLHttpRequest"
-        api_resp = requests.post(api_url, data=post_data, headers=post_headers, timeout=15)
+        api_resp = _SESSION.post(api_url, data=post_data, headers=post_headers, timeout=15)
         info = api_resp.json()
         dom = info.get("dom", "")
         url_token = info.get("url", "")
@@ -995,6 +1038,94 @@ def _fetch_native_cached(t, native_pg, wd=None):
     )
     if used_key and used_key != "ffzy":
         print(f"[native-cache] 主源 ffzy 不可用，本页由 {used_key} 提供", flush=True)
+    # 短剧分类（t=36）：确保返回的确实是短剧数据
+    # 注意：ffzy 主源的 t=36 在某些情况下（如 wd=None 推荐页、源缓存异常）
+    # 也可能返回非短剧数据（如体育、邵氏电影）；而备源 wuj 的 t=36 是邵氏电影
+    # 全集，lzi 的 t=36 只有 3 条体育比赛，完全不是短剧。
+    # 所以无论 used_key 是什么，都必须按短剧关键字严格过滤。
+    if t == 36 and items:
+        def _is_shorts(it):
+            g = (it.get("genre") or "") + ""
+            tag = (it.get("tag") or "") + ""
+            rmk = (it.get("remarks") or "") + ""
+            title = (it.get("title") or "") + ""
+            return ("短剧" in g) or ("短剧" in tag) or ("短剧" in rmk) or ("短剧" in title)
+
+        original_len = len(items)
+        filtered = [it for it in items if _is_shorts(it)]
+        for it in filtered:
+            it["contentType"] = "shorts"
+
+        if filtered:
+            items = filtered
+            if len(filtered) < original_len:
+                print(f"[native-cache] t=36 过滤: {used_key} 原始 {original_len} 条 → 过滤后 {len(filtered)} 条", flush=True)
+        else:
+            # 全部被过滤（返回的全是非短剧数据）
+            print(f"[native-cache] {used_key} t=36 全为非短剧数据（{original_len} 条），依次尝试 ffzy2 → 题材合并兜底", flush=True)
+            # 1) 先尝试 ffzy2
+            ffzy2_items, ffzy2_pc, ffzy2_total = fetch_site_list("ffzy2", t=t, pg=native_pg, wd=wd)
+            ffzy2_filtered = [it for it in (ffzy2_items or []) if _is_shorts(it)]
+            if ffzy2_filtered:
+                for it in ffzy2_filtered:
+                    it["contentType"] = "shorts"
+                items, pagecount, total = ffzy2_filtered, ffzy2_pc, ffzy2_total
+                print(f"[native-cache] t=36 兜底 ffzy2 成功: {len(ffzy2_filtered)} 条", flush=True)
+            else:
+                # 2) ffzy2 也没有时，按「题材合并」兜底：
+                #    分别用 总裁/穿越/重生/战神/逆袭/赘婿 各抓 pg=1 合并，
+                #    即便 ffzy/ffzy2 的默认 t=36 wd=None 完全挂了，推荐 tab 仍然能出来真实短剧。
+                fallback_keywords = ["总裁", "穿越", "重生", "战神", "逆袭", "赘婿"]
+                kw_items = []
+                seen_title = set()
+                for kw in fallback_keywords:
+                    try:
+                        kws, _, _ = fetch_site_list("ffzy", t=36, pg=1, wd=kw)
+                    except Exception as e:
+                        print(f"[native-cache] 兜底 ffzy wd={kw} 出错: {e}", flush=True)
+                        continue
+                    for it in (kws or []):
+                        if not _is_shorts(it):
+                            continue
+                        tl = (it.get("title") or "").replace(" ", "")
+                        if tl in seen_title:
+                            continue
+                        seen_title.add(tl)
+                        it["contentType"] = "shorts"
+                        kw_items.append(it)
+                # ffzy 关键词没填满 20 条，再用 ffzy2 关键词补齐
+                if len(kw_items) < 20:
+                    for kw in fallback_keywords:
+                        if len(kw_items) >= 20:
+                            break
+                        try:
+                            kws, _, _ = fetch_site_list("ffzy2", t=36, pg=1, wd=kw)
+                        except Exception as e:
+                            print(f"[native-cache] 兜底 ffzy2 wd={kw} 出错: {e}", flush=True)
+                            continue
+                        for it in (kws or []):
+                            if not _is_shorts(it):
+                                continue
+                            tl = (it.get("title") or "").replace(" ", "")
+                            if tl in seen_title:
+                                continue
+                            seen_title.add(tl)
+                            it["contentType"] = "shorts"
+                            kw_items.append(it)
+                            if len(kw_items) >= 20:
+                                break
+                if kw_items:
+                    # 按题材混合模拟推荐：虚拟分页（每页 20 条）
+                    per_page = 20
+                    total_pages = max(1, (len(kw_items) + per_page - 1) // per_page)
+                    start = (native_pg - 1) * per_page
+                    page_slice = kw_items[start:start + per_page]
+                    items = page_slice
+                    pagecount = total_pages
+                    total = len(kw_items)
+                    print(f"[native-cache] t=36 题材兜底成功: 共 {len(kw_items)} 条, 当前页({native_pg})={len(page_slice)} 条", flush=True)
+                else:
+                    items, pagecount, total = [], 1, 0
     _NATIVE_PAGE_CACHE[key] = (now, items, pagecount, total)
     return items, pagecount, total
 
@@ -1228,7 +1359,7 @@ def stream():
     headers["Referer"] = guess_referer(raw_url)
 
     try:
-        upstream = requests.get(raw_url, headers=headers, timeout=TIMEOUT, stream=True)
+        upstream = _SESSION.get(raw_url, headers=headers, timeout=TIMEOUT, stream=True)
     except Exception as e:
         return Response("upstream error: " + str(e), status=502)
 

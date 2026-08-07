@@ -212,15 +212,10 @@ export default {
       this.searched = false
       this.results = []
     },
-    async handleItemClick(item) {
+    handleItemClick(item) {
       if (!item) return
       const ct = this.currentTab.key === 'shorts' ? 'shorts' : ''
-      try {
-        uni.showLoading({ title: '加载中…', mask: true })
-        await navigateToPlayer(item, null, ct)
-      } finally {
-        uni.hideLoading()
-      }
+      navigateToPlayer(item, null, ct)
     },
     onCoverError(e) {}
   }

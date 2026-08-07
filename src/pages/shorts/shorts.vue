@@ -108,26 +108,76 @@ export default {
     }
   },
   async onShow() {
-    if (this.cats.length === 0) {
-      this.cats = await fetchShortsTabs()
+    // cats 是本地数据（delay 200ms），和列表并行加载
+    const catsPromise = this.cats.length === 0
+      ? fetchShortsTabs().then(c => { this.cats = c })
+      : Promise.resolve()
+    // 首次加载：尝试从持久化缓存恢复（秒出，无骨架屏），再后台静默刷新
+    if (!this.initialized) {
+      if (this._restoreFromStorage()) {
+        this.initialized = true
+        this.loading = false
+        this.loadList(true, true)
+        catsPromise.catch(() => {})
+        return
+      }
     }
-    await this.loadList(true)
+    // 首次显示骨架屏；后续返回不闪骨架屏，静默刷新
+    if (this.initialized) {
+      await this.loadList(true, true)
+    } else {
+      await this.loadList(true)
+    }
+    // 确保 cats 已就绪（不阻塞列表显示）
+    catsPromise.catch(() => {})
   },
   methods: {
+    // 从持久化缓存恢复首屏数据（秒开，跳过骨架屏）
+    _restoreFromStorage() {
+      try {
+        const raw = uni.getStorageSync('vmk_shorts_cache')
+        if (!raw) return false
+        const cache = typeof raw === 'string' ? JSON.parse(raw) : raw
+        if (!cache || !cache.list || !cache.list.length) return false
+        // 超过 2 小时的缓存不再用于秒开
+        if (cache.t && (Date.now() - cache.t) > 2 * 60 * 60 * 1000) return false
+        this.list = cache.list
+        if (cache.cats && cache.cats.length) this.cats = cache.cats
+        if (typeof cache.cat === 'number') this.cat = cache.cat
+        this.page = 2   // 已有第 1 页，下次触底加载第 2 页
+        this.hasMore = cache.hasMore !== false
+        return true
+      } catch (e) {
+        return false
+      }
+    },
+    // 持久化首屏数据，下次冷启动秒开
+    _saveToStorage() {
+      try {
+        uni.setStorageSync('vmk_shorts_cache', {
+          list: this.list,
+          cats: this.cats,
+          cat: this.cat,
+          hasMore: this.hasMore,
+          t: Date.now()
+        })
+      } catch (e) {}
+    },
     // reset=true 表示切换分类/首次加载，重置列表；false 表示加载下一页
-    async loadList(reset = false) {
+    // silent=true 表示静默刷新（不清空列表、不显示骨架屏）
+    async loadList(reset = false, silent = false) {
       if (this.listLoading) return
       if (!reset && !this.hasMore) return
       this.listLoading = true
       if (reset) {
         this.page = 1
         this.hasMore = true
-        this.list = []
+        if (!silent) this.list = []
         this._autoLoadCount = 0
       }
       const catName = this.cats[this.cat] || '推荐'
       const targetPg = this.page
-      console.log('[shorts] loadList: cat=' + catName + ', pg=' + targetPg + ', reset=' + reset)
+      console.log('[shorts] loadList: cat=' + catName + ', pg=' + targetPg + ', reset=' + reset + ', silent=' + silent)
       const res = await fetchShortsListPaged(catName, targetPg)
       if (res && Array.isArray(res.list)) {
         if (res.list.length) {
@@ -138,8 +188,10 @@ export default {
             this.page = (res.page || targetPg) + 1
           }
           console.log('[shorts] loadList ok: count=' + res.list.length + ', hasMore=' + this.hasMore + ', nextPg=' + this.page)
+          // 首屏数据就绪后持久化，下次冷启动秒开
+          if (reset) this._saveToStorage()
         } else if (reset) {
-          this.list = []
+          if (!silent) this.list = []
           this.hasMore = false
         } else {
           this.hasMore = false
@@ -200,14 +252,9 @@ export default {
         })
       }
     },
-    async goDetail(itemOrId) {
+    goDetail(itemOrId) {
       if (!itemOrId) return
-      try {
-        uni.showLoading({ title: '加载中…', mask: true })
-        await navigateToPlayer(itemOrId, null, 'shorts')
-      } finally {
-        uni.hideLoading()
-      }
+      navigateToPlayer(itemOrId, null, 'shorts')
     },
     goSearch() {
       uni.navigateTo({ url: '/pages/search/search' })

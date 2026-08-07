@@ -62,11 +62,32 @@ export function setPyApiBase(url) {
 export function getPyApiBase() {
   if (_overrideBase) return _overrideBase
   // 运行时检测环境（不依赖条件编译，App WebView 也能正确判断）
-  if (REMOTE_BASE) return REMOTE_BASE.replace(/\/+$/, '')
-  // 本地开发走 Vite 代理
-  if (typeof window !== 'undefined' && window.location && window.location.hostname === 'localhost') {
-    return '/__pyapi'
+  // H5 本地 / 开发模式：优先走 Vite 代理 /__pyapi → 本地 server.py:3001
+  // 触发条件（任一满足即视为本地开发）：
+  //   1. hostname 为 localhost / 127.0.0.1 / ::1 / *.local / 私有网段
+  //   2. 页面是 http 协议（非 https，App WebView 加载 file:// 会由后面兜底）
+  //   3. 端口在 Vite 常用范围（5173 / 5174 / 3000 / 8080）
+  if (typeof window !== 'undefined' && window.location) {
+    const hn = (window.location.hostname || '').toLowerCase()
+    const proto = (window.location.protocol || '').toLowerCase()
+    const port = window.location.port ? parseInt(window.location.port, 10) : 0
+    const isHttpProto = proto === 'http:'
+    const isLocalHostname =
+      hn === 'localhost' ||
+      hn === '127.0.0.1' ||
+      hn === '::1' ||
+      hn.endsWith('.local') ||
+      hn.endsWith('.svc.cluster.local') ||
+      hn.endsWith('.remote-agent.svc.cluster.local') ||
+      /^192\.168\./.test(hn) ||
+      /^10\./.test(hn) ||
+      /^172\.(1[6-9]|2\d|3[01])\./.test(hn)
+    const isDevPort = [5173, 5174, 3000, 3001, 8080, 8081].indexOf(port) >= 0
+    if (isHttpProto && (isLocalHostname || isDevPort || hn.length === 0)) {
+      return '/__pyapi'
+    }
   }
+  if (REMOTE_BASE) return REMOTE_BASE.replace(/\/+$/, '')
   return LOCAL_BASE
 }
 export const PY_API_BASE = getPyApiBase()

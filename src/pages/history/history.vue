@@ -90,14 +90,9 @@ export default {
       if (pages.length > 1) uni.navigateBack()
       else uni.redirectTo({ url: '/pages/profile/profile' })
     },
-    async goDetail(item) {
+    goDetail(item) {
       if (!item) return
-      try {
-        uni.showLoading({ title: '加载中…', mask: true })
-        await navigateToPlayer(item)
-      } finally {
-        uni.hideLoading()
-      }
+      navigateToPlayer(item)
     },
     toggleEdit() {
       this.editing = !this.editing

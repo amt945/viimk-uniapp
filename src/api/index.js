@@ -55,7 +55,6 @@ import {
   shortsFollowTabs as _shortsFollowTabs,
   shortsFollowRegions as _shortsFollowRegions,
   shortsFollowList as _shortsFollowList,
-  detailData as _detailData,
   profileStats as _profileStats,
   profileMenu as _profileMenu,
   historyList as _historyList,
@@ -144,6 +143,46 @@ const HOME_TAB_T_MAP = {
   '悬疑': 6,
 }
 
+// 列表分页内存缓存（首页/短剧/片库共用）
+// key = "home:cat:pg" / "shorts:tab:pg" / "library:cat:pg"
+// 缓存 3 分钟，切 tab 回来秒出
+const _listCache = new Map()
+const _listPromise = new Map() // in-flight Promise 去重（预热+页面同时调时只发 1 次请求）
+const LIST_CACHE_MS = 3 * 60 * 1000
+
+function _listCacheGet(key) {
+  const v = _listCache.get(key)
+  if (v && (Date.now() - v.t) < LIST_CACHE_MS) return v.d
+  if (v) _listCache.delete(key)
+  return null
+}
+function _listCacheSet(key, d) {
+  _listCache.set(key, { d, t: Date.now() })
+}
+// 带去重的列表请求：缓存命中→直接返回；in-flight→共享同一个 Promise；否则发请求
+function _listRequest(cacheKey, requestFn, pg) {
+  // 1) 值缓存命中
+  if ((pg || 1) === 1) {
+    const cached = _listCacheGet(cacheKey)
+    if (cached) return Promise.resolve(cached)
+  }
+  // 2) in-flight Promise 命中（预热和页面同时调时只发 1 次请求）
+  if (_listPromise.has(cacheKey)) {
+    return _listPromise.get(cacheKey)
+  }
+  // 3) 发真实请求
+  const p = requestFn()
+    .then(result => {
+      if (result && (pg || 1) === 1) _listCacheSet(cacheKey, result)
+      return result
+    })
+    .finally(() => {
+      _listPromise.delete(cacheKey)
+    })
+  _listPromise.set(cacheKey, p)
+  return p
+}
+
 /**
  * 首页"热门推荐"无限滚动：按分类 tab 分页加载
  * 复用 /api/home 路径（带 pg 参数走分页模式），并传数字 t（type_id）。
@@ -158,21 +197,23 @@ const HOME_TAB_T_MAP = {
  */
 export function fetchHomeList(cat, pg) {
   const t = HOME_TAB_T_MAP[cat] != null ? HOME_TAB_T_MAP[cat] : 0
-  // t=0 表示最新全部（推荐/热播），不传 t 参数；t>0 才传
   const params = t > 0 ? { t: t, pg: pg || 1 } : { pg: pg || 1 }
-  return onlineRequest('/api/home', params)
-    .then((res) => {
-      if (!res || res.code !== 0 || !res.data || !Array.isArray(res.data.list)) return null
-      return {
-        list: res.data.list,
-        hasMore: !!res.data.hasMore,
-        page: res.data.page || pg
-      }
-    })
-    .catch((err) => {
-      console.warn('[online] home list error', err)
-      return null
-    })
+  const cacheKey = 'home:' + (t || 0) + ':' + (pg || 1)
+  return _listRequest(cacheKey, () => {
+    return onlineRequest('/api/home', params)
+      .then((res) => {
+        if (!res || res.code !== 0 || !res.data || !Array.isArray(res.data.list)) return null
+        return {
+          list: res.data.list,
+          hasMore: !!res.data.hasMore,
+          page: res.data.page || pg
+        }
+      })
+      .catch((err) => {
+        console.warn('[online] home list error', err)
+        return null
+      })
+  }, pg)
 }
 
 /**
@@ -285,43 +326,44 @@ export function fetchShortsListPaged(cat, pg) {
   const idx = SHORTS_TABS.indexOf(cat)
   const tab = idx >= 0 ? idx : 0
   const params = { tab: tab, pg: pg || 1 }
-  return onlineRequest('/api/shorts', params)
-    .then((res) => {
-      if (!res || res.code !== 0 || !res.data || !Array.isArray(res.data.list)) return null
-      return {
-        list: res.data.list,
-        hasMore: !!res.data.hasMore,
-        page: res.data.page || pg
-      }
-    })
-    .catch((err) => {
-      console.warn('[online] shorts list error', err)
-      return null
-    })
+  const cacheKey = 'shorts:' + tab + ':' + (pg || 1)
+  return _listRequest(cacheKey, () => {
+    return onlineRequest('/api/shorts', params)
+      .then((res) => {
+        if (!res || res.code !== 0 || !res.data || !Array.isArray(res.data.list)) return null
+        return {
+          list: res.data.list,
+          hasMore: !!res.data.hasMore,
+          page: res.data.page || pg
+        }
+      })
+      .catch((err) => {
+        console.warn('[online] shorts list error', err)
+        return null
+      })
+  }, pg)
 }
 
-/* ========================= 详情页 ========================= */
-/**
- * 作品详情 + 剧集列表
- * GET /detail/:id
- */
-export function fetchDetail(id) {
-  return delay({
-    ..._detailData,
-    id: id || _detailData.id,
-    episodes: _detailData.episodes.map(e => ({ ...e }))
-  })
-}
+/* ========================= 详情页（已移除，播放页直接加载详情） ========================= */
 
 /* ========================= 片库 =========================
  * 由 Python 后端 /api/list 提供（ffzy 采集站按分类分页）
  * 失败时回退到 mock 数据。
  */
+let _libCatsCache = null
+let _libCatsCacheAt = 0
 export function fetchLibraryCategories() {
+  const now = Date.now()
+  if (_libCatsCache && (now - _libCatsCacheAt) < LIST_CACHE_MS) {
+    return Promise.resolve(_libCatsCache)
+  }
   return onlineRequest('/api/categories')
     .then((res) => {
       if (!res || res.code !== 0 || !Array.isArray(res.data)) return ['全部', '电影', '电视剧', '综艺', '动漫', '纪录片']
-      return res.data.map(c => c.name)
+      const cats = res.data.map(c => c.name)
+      _libCatsCache = cats
+      _libCatsCacheAt = Date.now()
+      return cats
     })
     .catch(() => ['全部', '电影', '电视剧', '综艺', '动漫', '纪录片'])
 }
@@ -356,21 +398,23 @@ const LIBRARY_TAB_T_MAP = {
  */
 export function fetchLibraryListPaged(cat, pg) {
   const t = LIBRARY_TAB_T_MAP[cat] != null ? LIBRARY_TAB_T_MAP[cat] : 0
-  // t=0 表示最新全部，不传 t 参数；t>0 才传
   const params = t > 0 ? { t: t, pg: pg || 1 } : { pg: pg || 1 }
-  return onlineRequest('/api/list', params)
-    .then((res) => {
-      if (!res || res.code !== 0 || !res.data || !Array.isArray(res.data.list)) return null
-      return {
-        list: res.data.list,
-        hasMore: !!res.data.hasMore,
-        page: res.data.page || pg
-      }
-    })
-    .catch((err) => {
-      console.warn('[online] library list error', err)
-      return null
-    })
+  const cacheKey = 'library:' + (t || 0) + ':' + (pg || 1)
+  return _listRequest(cacheKey, () => {
+    return onlineRequest('/api/list', params)
+      .then((res) => {
+        if (!res || res.code !== 0 || !res.data || !Array.isArray(res.data.list)) return null
+        return {
+          list: res.data.list,
+          hasMore: !!res.data.hasMore,
+          page: res.data.page || pg
+        }
+      })
+      .catch((err) => {
+        console.warn('[online] library list error', err)
+        return null
+      })
+  }, pg)
 }
 
 function mockLibraryList() {
@@ -386,12 +430,12 @@ function mockLibraryList() {
 
 /* ========================= 通用：mock 项 → 真实在线结果 =========================
  * 首页/片库/短剧的 mock fallback 数据没有 onlineSite/vodId，
- * 点击这类卡片时先用标题搜 ffzy，取第一个结果的 vodId 跳 detail.vue，
- * 保证用户始终进入真实详情页，不会落到 mock detail.vue。
+ * 点击这类卡片时先用标题搜 ffzy，取第一个结果的 vodId 跳播放页，
+ * 保证用户始终进入真实播放页，不会落到 mock 数据。
  */
 
 /**
- * 把任意 item（可能是 mock 或 online）解析为可跳转 detail.vue 的真实在线信息。
+ * 把任意 item（可能是 mock 或 online）解析为可跳转播放页的真实在线信息。
  * mock 项会先做一次在线搜索，取标题第一个命中结果做映射。
  * @param {Object|string|number} itemOrId item 对象、或纯 id 数字、或纯 title 字符串
  * @param {string} [fallbackTitle] itemOrId 是纯 id 时需提供的标题
@@ -427,42 +471,61 @@ export async function resolveOnlineItem(itemOrId, fallbackTitle) {
 }
 
 /**
- * 用 resolveOnlineItem 的结果跳 detail.vue（详情页）。
- * 列表卡片点击 → 详情页 → 播放页
- */
-export async function navigateToDetail(itemOrId, fallbackTitle, contentType) {
-  const info = await resolveOnlineItem(itemOrId, fallbackTitle)
-  if (!info || !info.vodId) {
-    uni.showToast({ title: '暂无可播放资源', icon: 'none' })
-    return false
-  }
-  const params = [
-    'vodId=' + encodeURIComponent(info.vodId),
-    'site=' + encodeURIComponent(info.onlineSite),
-    'title=' + encodeURIComponent(info.title || '')
-  ]
-  if (contentType) params.push('contentType=' + encodeURIComponent(contentType))
-  uni.navigateTo({ url: '/pages/detail/detail?' + params.join('&') })
-  return true
-}
-
-/**
- * 列表卡片直接跳播放页（跳过详情页）。
+ * 列表卡片直接跳播放页（跳过详情页，详情页已移除）。
  * 列表卡片点击 → 播放页（player.vue 自身会加载详情+集数）
  *
- * 为实现"秒开"，这里不再预先请求 detail（播放页 onLoad 内部会调 fetchOnlineDetail），
- * 只把 vodId / site / title / contentType 透传给 player，由播放页并行加载。
+ * 秒开策略：
+ * 1) 在线 item（有 vodId + onlineSite）→ 同步跳转，零等待
+ * 2) mock / 纯标题 item → 异步搜索解析后跳转（回退路径，极少触发）
  *
  * @param {Object|string|number} itemOrId
  * @param {string} [fallbackTitle]
  * @param {string} [contentType] 'shorts' 表示短剧布局
  * @returns {Promise<boolean>}
  */
+/**
+ * 判断一个内容项是否是短剧：优先用 contentType，兜底用 genre/tag/remarks 含"短剧"关键词
+ */
+function _isShortsItem(item) {
+  if (!item || typeof item !== 'object') return false
+  if (item.contentType === 'shorts') return true
+  const g = (item.genre || item.tag || item.remarks || item.meta || '') + ''
+  return g.indexOf('短剧') > -1
+}
+
 export async function navigateToPlayer(itemOrId, fallbackTitle, contentType) {
+  if (!itemOrId) return false
+
+  // 优先用显式传入的 contentType，其次用 item 自带，最后用关键词兜底
+  let resolvedType = contentType || (typeof itemOrId === 'object' && itemOrId.contentType) || ''
+  if (!resolvedType && typeof itemOrId === 'object') {
+    resolvedType = _isShortsItem(itemOrId) ? 'shorts' : ''
+  }
+
+  // 快速路径：在线 item 直接同步跳转（覆盖 99% 场景）
+  if (typeof itemOrId === 'object' && itemOrId.onlineSite && itemOrId.vodId) {
+    const params = [
+      'vodId=' + encodeURIComponent(itemOrId.vodId),
+      'site=' + encodeURIComponent(itemOrId.onlineSite),
+      'title=' + encodeURIComponent(itemOrId.title || fallbackTitle || ''),
+      'epIdx=0'
+    ]
+    const cover = itemOrId.cover || itemOrId.pic || ''
+    if (cover) params.push('poster=' + encodeURIComponent(cover))
+    if (resolvedType) params.push('contentType=' + encodeURIComponent(resolvedType))
+    uni.navigateTo({ url: '/pages/player/player?' + params.join('&') })
+    return true
+  }
+
+  // 回退路径：mock / 纯标题 → 在线搜索解析后跳转
   const info = await resolveOnlineItem(itemOrId, fallbackTitle)
   if (!info || !info.vodId) {
     uni.showToast({ title: '暂无可播放资源', icon: 'none' })
     return false
+  }
+  // 回退路径也做一次兜底识别
+  if (!resolvedType) {
+    resolvedType = _isShortsItem(info) ? 'shorts' : ''
   }
   const params = [
     'vodId=' + encodeURIComponent(info.vodId),
@@ -470,10 +533,9 @@ export async function navigateToPlayer(itemOrId, fallbackTitle, contentType) {
     'title=' + encodeURIComponent(info.title || ''),
     'epIdx=0'
   ]
-  // 透传列表项的封面，播放页加载详情时可立即显示，提升秒开体感
   const cover = (typeof itemOrId === 'object' && itemOrId && (itemOrId.cover || itemOrId.pic)) || ''
   if (cover) params.push('poster=' + encodeURIComponent(cover))
-  if (contentType) params.push('contentType=' + encodeURIComponent(contentType))
+  if (resolvedType) params.push('contentType=' + encodeURIComponent(resolvedType))
   uni.navigateTo({ url: '/pages/player/player?' + params.join('&') })
   return true
 }

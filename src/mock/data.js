@@ -75,26 +75,6 @@ export const shortsFollowList = [
   { id: 8, title: '爱在黎明前', cover: IMG.fanhua, rating: '9.3', meta: '甜宠 · 2024' }
 ]
 
-// 详情页
-export const detailData = {
-  id: 1,
-  title: '三体',
-  cover: IMG.santi,
-  score: '9.4',
-  genre: '科幻',
-  region: '中国大陆',
-  year: '2023',
-  synopsis: '2023年，地球基础科学出现了异常的扰动，纳米科学家汪淼进入神秘的网络游戏《三体》，开始逐步逼近这个世界的真相。玩家兴起社群之间相互厮杀，最终揭示了一个令人震惊的宇宙图景。',
-  episodes: [
-    { id: 1, cover: IMG.kuangbiao },
-    { id: 2, cover: IMG.yishan },
-    { id: 3, cover: IMG.santi2 },
-    { id: 4, cover: IMG.liulang },
-    { id: 5, cover: IMG.qingyu },
-    { id: 6, cover: IMG.manchang }
-  ]
-}
-
 // 我的页面
 export const profileStats = [
   { label: '历史记录', value: 12 },
@@ -136,8 +116,8 @@ export const favoriteList = [
 export const aboutInfo = {
   appName: 'VIIMK',
   slogan: '看见每一部热爱',
-  version: '1.0.0',
-  build: '20260803',
+  version: '1.0.1',
+  build: '20260807',
   description: 'VIIMK 是一款专注于优质短剧与影视内容的流媒体应用，致力于为用户提供沉浸式的观影体验，发现每一部值得热爱的作品。'
 }
 

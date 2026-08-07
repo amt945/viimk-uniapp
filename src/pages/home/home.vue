@@ -164,27 +164,77 @@ export default {
     }
   },
   async onShow() {
-    await this.loadAll()
+    // 首次加载：尝试从持久化缓存恢复（秒出，无骨架屏），再后台静默刷新
+    if (!this.hotInitialized) {
+      if (this._restoreFromStorage()) {
+        this.hotInitialized = true
+        this.loading = false
+        // 后台静默刷新（不显示骨架屏、不闪烁）
+        this.loadAll(false, true)
+        return
+      }
+    }
+    // 无缓存：首次显示骨架屏；后续返回不闪骨架屏，静默刷新
+    await this.loadAll(!this.hotInitialized)
   },
   methods: {
-    async loadAll() {
-      this.loading = true
+    async loadAll(showLoading = true, silent = false) {
+      if (showLoading) this.loading = true
       try {
-        const [banner, cats] = await Promise.all([
+        // 并行加载：hero/categories 和列表同时发起
+        // 列表就绪后立即隐藏骨架屏，不等 hero
+        const listPromise = this.loadHotList(true, silent)
+        const headerPromise = Promise.all([
           fetchHeroBanner(),
           fetchHomeCategories()
-        ])
-        this.heroBanner = banner
-        this.homeCategories = cats
-        // 首屏加载热门推荐：优先加载够滚动（4行=12条，保证出现滚动条
-        await this.loadHotList(true)
+        ]).then(([banner, cats]) => {
+          this.heroBanner = banner
+          this.homeCategories = cats
+        })
+        // 等列表就绪即可隐藏骨架屏
+        await listPromise
+        this.loading = false
+        // hero/categories 在后台继续加载（不阻塞列表显示）
+        headerPromise.catch(() => {})
+        // 首屏数据就绪后持久化，下次冷启动秒开
+        headerPromise.then(() => this._saveToStorage())
       } finally {
         this.loading = false
-        // 首屏加载完后，如果还没有滚动条但还有下一页，自动继续加载
         this.$nextTick(() => {
           this._ensureScrollable()
         })
       }
+    },
+    // 从持久化缓存恢复首屏数据（秒开，跳过骨架屏）
+    _restoreFromStorage() {
+      try {
+        const raw = uni.getStorageSync('vmk_home_cache')
+        if (!raw) return false
+        const cache = typeof raw === 'string' ? JSON.parse(raw) : raw
+        if (!cache || !cache.list || !cache.list.length) return false
+        // 超过 2 小时的缓存不再用于秒开（太旧就走正常加载）
+        if (cache.t && (Date.now() - cache.t) > 2 * 60 * 60 * 1000) return false
+        this.hotList = cache.list
+        this.heroBanner = cache.banner || {}
+        if (cache.cats && cache.cats.length) this.homeCategories = cache.cats
+        this.hotPage = 2   // 已有第 1 页，下次触底加载第 2 页
+        this.hotHasMore = cache.hasMore !== false
+        return true
+      } catch (e) {
+        return false
+      }
+    },
+    // 持久化首屏数据，下次冷启动秒开
+    _saveToStorage() {
+      try {
+        uni.setStorageSync('vmk_home_cache', {
+          list: this.hotList,
+          banner: this.heroBanner,
+          cats: this.homeCategories,
+          hasMore: this.hotHasMore,
+          t: Date.now()
+        })
+      } catch (e) {}
     },
     /**
      * 保证首页首屏 6 条（2 行）可能不足以撑出滚动条，用户无法滚动，
@@ -250,7 +300,8 @@ export default {
     },
     // 加载热门推荐列表（首页无限滚动）
     // reset=true 表示切换分类/首次加载，重置列表；false 表示加载下一页
-    async loadHotList(reset = false) {
+    // silent=true 表示静默刷新（不先清空列表，失败时保留已有数据，避免闪烁）
+    async loadHotList(reset = false, silent = false) {
       if (this.hotLoading) {
         console.log('[home] loadHotList skip: loading=true')
         return
@@ -263,12 +314,13 @@ export default {
       if (reset) {
         this.hotPage = 1
         this.hotHasMore = true
-        this.hotList = []
+        // 静默刷新不先清空列表，等新数据到达后原子替换，避免闪烁
+        if (!silent) this.hotList = []
         this._autoLoadCount = 0   // 重置自动补载计数（切分类/首屏后又可以自动补 3 页）
       }
       const cat = this.homeCategories[this.activeCategory] || '推荐'
       const targetPg = this.hotPage
-      console.log('[home] loadHotList start: cat=' + cat + ', pg=' + targetPg + ', reset=' + reset)
+      console.log('[home] loadHotList start: cat=' + cat + ', pg=' + targetPg + ', reset=' + reset + ', silent=' + silent)
       const res = await fetchHomeList(cat, targetPg)
       // —— 三种情况分别处理：成功有数据 / 成功但空 / 请求失败(res=null) ——
       if (res && Array.isArray(res.list)) {
@@ -283,7 +335,7 @@ export default {
           console.log('[home] loadHotList ok: count=' + res.list.length + ', hasMore=' + this.hotHasMore + ', nextPg=' + this.hotPage)
         } else if (reset) {
           // reset 但返回空：分类下没有内容
-          this.hotList = []
+          if (!silent) this.hotList = []
           this.hotHasMore = false
           console.log('[home] loadHotList reset empty (分类无数据)')
         } else {
@@ -296,8 +348,8 @@ export default {
         // 失败不能把 hasMore 设 false，否则用户永远不能再触底重试；
         // 也不能推进页码，下次重试还是同一页
         console.warn('[home] loadHotList FAIL: 请求失败，保留 hasMore=true，下次重试 pg=' + targetPg)
-        if (reset) {
-          // reset 失败至少清空 loading 状态，列表保持空
+        if (reset && !silent) {
+          // reset 失败至少清空 loading 状态，列表保持空（静默刷新失败保留已有数据）
           this.hotList = []
         }
       }
@@ -338,17 +390,12 @@ export default {
       uni.navigateTo({ url: '/pages/library/library' })
     },
     // 列表卡片直接跳播放页（跳过详情页）
-    async goDetail(itemOrId) {
+    goDetail(itemOrId) {
       if (!itemOrId) return
-      try {
-        uni.showLoading({ title: '加载中…', mask: true })
-        await navigateToPlayer(itemOrId)
-      } finally {
-        uni.hideLoading()
-      }
+      navigateToPlayer(itemOrId)
     },
-    async goPlayer(itemOrId) {
-      await this.goDetail(itemOrId)
+    goPlayer(itemOrId) {
+      this.goDetail(itemOrId)
     },
     goSearch() {
       uni.navigateTo({ url: '/pages/search/search' })

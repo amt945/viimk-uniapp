@@ -4,8 +4,9 @@
 
 // 当前版本信息（与 manifest.json 保持一致）
 export const APP_VERSION = {
-  versionName: '1.0.0',
-  versionCode: 100
+  versionName: '1.0.1',
+  versionCode: 101,
+  build: '20260807'
 }
 
 // 更新检查接口地址

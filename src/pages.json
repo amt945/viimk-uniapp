@@ -33,14 +33,6 @@
       }
     },
     {
-      "path": "pages/detail/detail",
-      "style": {
-        "navigationStyle": "custom",
-        "mp-weixin": { "navigationStyle": "custom" },
-        "app-plus": { "titleNView": false, "animationType": "slide-in-right" }
-      }
-    },
-    {
       "path": "pages/search/search",
       "style": {
         "navigationStyle": "custom",
