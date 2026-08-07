@@ -24,6 +24,8 @@ VIIMK 视频爬虫后端
 
 import os
 import re
+import sys
+import json
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urlparse, urljoin, quote, urlencode
@@ -1005,6 +1007,184 @@ def vlist():
     items, pagecount, total = _fetch_native_cached(t, pg)
     return jsonify({"code": 0, "data": {
         "list": items, "page": pg, "pagecount": pagecount,
+        "total": total, "hasMore": pg < pagecount,
+    }})
+
+
+# ============ 动作片列表（final_crawler.py 爬取的数据） ============
+ACTION_PAGE_SIZE = 30        # 触底分页每页条数（3 列网格，30 条 ≈ 10 行）
+_ACTION_CACHE = None
+_ACTION_CACHE_AT = 0
+_ACTION_CACHE_TTL = 1800  # 30 分钟缓存，爬虫较慢避免频繁调用
+_ACTION_LOCK = _thr.Lock()
+
+
+def _run_final_crawler():
+    """执行 final_crawler.py 并返回结果列表"""
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    json_path = os.path.join(base_dir, "video_results.json")
+
+    # 1) 优先使用已有的 video_results.json（之前手动运行爬虫生成的）
+    if os.path.exists(json_path):
+        try:
+            mtime = os.path.getmtime(json_path)
+            # 文件不超过 6 小时直接复用
+            if (time.time() - mtime) < 6 * 3600:
+                with open(json_path, "r", encoding="utf-8") as f:
+                    results = json.load(f)
+                if results:
+                    print(f"[action] reuse video_results.json: {len(results)} items", flush=True)
+                    return results
+        except Exception:
+            pass
+
+    # 2) 运行 final_crawler.py 重新爬取
+    import subprocess as _sp
+    crawler_path = os.path.join(base_dir, "final_crawler.py")
+    if not os.path.exists(crawler_path):
+        print("[action] final_crawler.py not found", flush=True)
+        return []
+    try:
+        print("[action] running final_crawler.py ...", flush=True)
+        proc = _sp.run(
+            [sys.executable, crawler_path],
+            capture_output=True, text=True, timeout=600,
+            cwd=base_dir
+        )
+        if proc.returncode != 0:
+            print(f"[action] crawler exit={proc.returncode}", flush=True)
+            print(f"[action] stderr: {proc.stderr[-500:]}", flush=True)
+            return []
+        # 读取生成的 video_results.json
+        if os.path.exists(json_path):
+            with open(json_path, "r", encoding="utf-8") as f:
+                results = json.load(f)
+            print(f"[action] crawler returned {len(results)} items", flush=True)
+            return results
+    except _sp.TimeoutExpired:
+        print("[action] crawler timed out (120s)", flush=True)
+    except Exception as e:
+        print(f"[action] crawler error: {e}", flush=True)
+    return []
+
+
+def _get_action_items():
+    """获取动作片列表（带缓存）"""
+    global _ACTION_CACHE, _ACTION_CACHE_AT
+    import time as _tm
+    now = _tm.time()
+    # 缓存有效期内直接返回
+    if _ACTION_CACHE and (now - _ACTION_CACHE_AT) < _ACTION_CACHE_TTL:
+        return _ACTION_CACHE
+    # 加锁避免并发重复执行爬虫
+    with _ACTION_LOCK:
+        # double-check
+        if _ACTION_CACHE and (_tm.time() - _ACTION_CACHE_AT) < _ACTION_CACHE_TTL:
+            return _ACTION_CACHE
+        items = _run_final_crawler()
+        if items:
+            _ACTION_CACHE = items
+            _ACTION_CACHE_AT = _tm.time()
+        return items
+
+
+# ============ 封面代理：解密 yp262 加密封面 ============
+# yp262 的封面图经过 AES-ECB 加密, 前端无法直接 <img src> 显示。
+# /api/cover_proxy?url=xxx 端点负责拉取加密封面、解密后返回真实图片。
+_COVER_CACHE = {}            # url -> (bytes, content_type, timestamp)
+_COVER_CACHE_TTL = 3600      # 1 小时缓存, 避免重复解密
+
+
+def _is_encrypted_cover(url):
+    """检测是否为 yp262 加密封面 URL (含 /enc/ 路径)"""
+    return bool(url) and "/enc/" in url
+
+
+def _decrypt_cover(cover_url):
+    """解密 yp262 加密封面, 返回 (image_bytes, content_type) 或 None"""
+    cached = _COVER_CACHE.get(cover_url)
+    if cached and (time.time() - cached[2]) < _COVER_CACHE_TTL:
+        return cached[0], cached[1]
+
+    # 懒加载 final_crawler (避免循环导入)
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    if base_dir not in sys.path:
+        sys.path.insert(0, base_dir)
+    from final_crawler import decrypt_cover_url
+
+    img_bytes = decrypt_cover_url(cover_url)
+    if not img_bytes:
+        return None
+
+    if img_bytes[:4] == b"RIFF":
+        ct = "image/webp"
+    elif img_bytes[:2] == b"\xff\xd8":
+        ct = "image/jpeg"
+    elif img_bytes[:8] == b"\x89PNG\r\n\x1a\n":
+        ct = "image/png"
+    else:
+        ct = "image/jpeg"
+
+    _COVER_CACHE[cover_url] = (img_bytes, ct, time.time())
+    return img_bytes, ct
+
+
+@app.route("/api/cover_proxy")
+def cover_proxy():
+    """封面代理: 解密 yp262 加密封面并返回图片"""
+    url = flask_request.args.get("url", "")
+    if not url:
+        return Response(status=400)
+    result = _decrypt_cover(url)
+    if not result:
+        return Response(status=502)
+    img_bytes, ct = result
+    resp = Response(img_bytes, content_type=ct)
+    resp.headers["Cache-Control"] = "public, max-age=3600"
+    return resp
+
+
+@app.route("/api/action")
+def action_list():
+    """动作片列表：来自 final_crawler.py 爬取的三站点数据
+    支持触底分页：pg 参数控制页码，每页 ACTION_PAGE_SIZE 条。
+    返回格式与 /api/list 一致，前端直接复用列表渲染逻辑。
+    """
+    items = _get_action_items()
+    total = len(items)
+    # 内存分页（数据已在 _get_action_items 缓存，切片开销极小）
+    try:
+        pg = max(1, int(flask_request.args.get("pg", 1)))
+    except (TypeError, ValueError):
+        pg = 1
+    pagecount = (total + ACTION_PAGE_SIZE - 1) // ACTION_PAGE_SIZE if total else 1
+    if pg > pagecount:
+        pg = pagecount
+    start = (pg - 1) * ACTION_PAGE_SIZE
+    end = start + ACTION_PAGE_SIZE
+    page_items = items[start:end]
+
+    # 映射为前端期望的列表项格式
+    mapped = []
+    for it in page_items:
+        cover_url = it.get("pic") or ""
+        # yp262 加密封面 URL → 走 /api/cover_proxy 代理解密
+        if _is_encrypted_cover(cover_url):
+            cover_url = "/api/cover_proxy?url=" + quote(cover_url, safe="")
+        mapped.append({
+            "id": it.get("id") or ("action_" + str(start + len(mapped))),
+            "title": it.get("title") or "",
+            "cover": cover_url,
+            "coverUrl": cover_url,
+            "url": it.get("url") or "",
+            "videoType": it.get("type") or "",
+            "source_url": it.get("source_url") or "",
+            "site": it.get("site") or "",
+            "contentType": "action",
+            "remarks": it.get("type") or "",
+        })
+    return jsonify({"code": 0, "data": {
+        "list": mapped, "page": pg, "pagecount": pagecount,
         "total": total, "hasMore": pg < pagecount,
     }})
 

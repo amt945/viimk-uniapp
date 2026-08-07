@@ -40,6 +40,16 @@ HEADERS = {
 DOWNLOAD_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'downloads')
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
+# ============================================================
+# 爬取规模控制
+# ============================================================
+# 不限流：全量抓取每个分类所有分页，前端通过 server.py 内存分页触底加载。
+MAX_PAGES_PER_CATEGORY = 9999    # 翻页上限设大值，实际靠"列表页无新链接则停止"自然终止
+MAX_ITEMS_PER_SITE = 999999      # 单站采集上限设大值，不截断
+CRAWL_DELAY = 0.3                # 请求间隔(秒)
+
+JSON_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'video_results.json')
+
 
 # ============================================================
 # AES 解密 - 经过验证的正确实现
@@ -67,6 +77,51 @@ def aes_ecb_decrypt_youtube(enc_b64, crypt_key_str):
     decrypted = cipher.decrypt(cipher_bytes)
     plain = unpad(decrypted, AES.block_size)
     return plain.decode('utf-8')
+
+
+def decrypt_cover_content(content):
+    """解密 yp262 加密封面图。
+
+    封面 URL 返回的文本格式: ``base:{marker}::{url_safe_b64_data}``
+    解密算法与视频 URL 相同 (AES-ECB / SHA256(marker) / Pkcs7),
+    区别是 key 来自 marker (``base:`` 后的第一个字段) 而非页面 crypt_key。
+
+    Returns:
+        bytes: 解密后的图片二进制数据 (JPEG/PNG/WebP), 失败返回 None。
+    """
+    if not content or not content.startswith('base:'):
+        return None
+    parts = content.split(':')
+    if len(parts) < 4:
+        return None
+    marker = parts[1]
+    data_str = parts[3].strip()
+    if not marker or not data_str:
+        return None
+    # URL-safe base64 -> standard
+    data_b64 = data_str.replace('-', '+').replace('_', '/')
+    pad_b64 = 4 - len(data_b64) % 4
+    if pad_b64 != 4:
+        data_b64 += '=' * pad_b64
+    try:
+        ciphertext = base64.b64decode(data_b64)
+        key = hashlib.sha256(marker.encode('utf-8')).digest()
+        cipher = AES.new(key, AES.MODE_ECB)
+        plain = unpad(cipher.decrypt(ciphertext), AES.block_size)
+        # 校验是否为有效图片
+        if plain[:4] == b'RIFF' or plain[:2] == b'\xff\xd8' or plain[:8] == b'\x89PNG\r\n\x1a\n':
+            return plain
+        return None
+    except Exception:
+        return None
+
+
+def decrypt_cover_url(cover_url):
+    """获取并解密 yp262 加密封面 URL, 返回图片 bytes 或 None。"""
+    r = safe_request(cover_url, timeout=15)
+    if not r or r.status_code != 200:
+        return None
+    return decrypt_cover_content(r.text)
 
 
 def safe_request(url, retries=3, timeout=30, extra_headers=None):
@@ -119,6 +174,159 @@ def extract_videos_generic(html, base_url):
             seen.add(r['url'])
             u.append(r)
     return u
+
+
+# ============================================================
+# 分页 & 分类发现 通用辅助
+# ============================================================
+def _maccms_collect_play_links(base, vodtype_id, max_pages=MAX_PAGES_PER_CATEGORY):
+    """收集 MacCMS 分类下所有播放链接及其封面图（自动分页）
+    MacCMS v10 分页 URL 格式: /vodtype/{id}-{page}.html
+    返回: [{url, cover}, ...]
+    """
+    all_items = []
+    seen = set()
+    for page in range(1, max_pages + 1):
+        if page == 1:
+            url = f"{base}/vodtype/{vodtype_id}.html"
+        else:
+            url = f"{base}/vodtype/{vodtype_id}-{page}.html"
+        r = safe_request(url, timeout=20)
+        if not r or r.status_code != 200:
+            break
+        if '521' in r.text[:300]:
+            break
+        html = r.text
+        new_count = 0
+
+        def _norm_cover(cover):
+            if not cover:
+                return ''
+            if cover.startswith('//'):
+                cover = 'https:' + cover
+            elif cover.startswith('/'):
+                cover = urljoin(r.url, cover)
+            return cover.replace('&amp;', '&')
+
+        # 策略: 以"封面图"为锚点找其所在卡片内的播放链接。
+        # yp262/MacCMS 列表页结构: <a href="/vodplay/ID-1-1.html"><img data-original="COVER"/></a>
+        # 用 BeautifulSoup 取 img 的最近祖先 <a href=/vodplay/>, 精确配对, 不会错位到相邻卡片。
+        paired = False
+        if HAS_BS4:
+            try:
+                from bs4 import BeautifulSoup
+                soup = BeautifulSoup(html, 'html.parser')
+                for img in soup.find_all('img'):
+                    cover = img.get('data-original') or img.get('data-src') or ''
+                    if not cover or not re.search(r'\.(?:jpg|jpeg|png|webp)', cover, re.I):
+                        continue
+                    a = img.find_parent('a', href=True)
+                    if not a:
+                        continue
+                    href = a.get('href', '')
+                    if not re.search(r'/vodplay/\d+-\d+-\d+\.html', href):
+                        continue
+                    full = urljoin(r.url, href)
+                    if full in seen:
+                        continue
+                    seen.add(full)
+                    all_items.append({'url': full, 'cover': _norm_cover(cover)})
+                    new_count += 1
+                    paired = True
+            except Exception:
+                paired = False
+
+        # 回退: 正则匹配 <a href=/vodplay/...><img data-original=...>
+        if not paired:
+            for mm in re.finditer(
+                r'<a[^>]*href="(/vodplay/\d+-\d+-\d+\.html)"[^>]*>\s*<img[^>]*?(?:data-original|data-src)="([^"]+)"',
+                html, re.I):
+                full = urljoin(r.url, mm.group(1))
+                if full in seen:
+                    continue
+                seen.add(full)
+                all_items.append({'url': full, 'cover': _norm_cover(mm.group(2))})
+                new_count += 1
+
+        # 最后兜底: 仅有播放链接、无封面的卡片也收集(留空 cover, 详情页再补)
+        for m in re.findall(r'href="(/vodplay/\d+-\d+-\d+\.html)"', html):
+            full = urljoin(r.url, m)
+            if full not in seen:
+                seen.add(full)
+                all_items.append({'url': full, 'cover': ''})
+                new_count += 1
+
+        if new_count == 0:
+            break
+        time.sleep(CRAWL_DELAY)
+    return all_items
+
+
+def _discover_maccms_categories(base, extra_ids=None):
+    """从 MacCMS 首页导航发现所有分类 ID
+    返回 [(id, name), ...] 列表
+    """
+    cats = []
+    seen_ids = set()
+    # 预置常见分类 ID
+    preset = list(extra_ids or [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 144, 145, 146, 147])
+    for cid in preset:
+        if cid not in seen_ids:
+            seen_ids.add(cid)
+            cats.append((cid, f'preset-{cid}'))
+
+    # 从首页导航发现更多分类
+    r = safe_request(base + '/', timeout=20)
+    if r and r.status_code == 200 and '521' not in r.text[:300]:
+        # 匹配 /vodtype/数字.html 或 /vodshow/数字.html
+        for m in re.finditer(r'href="(?:https?://[^/]+)?/vod(?:type|show)/(\d+)(?:-\d+)?\.html?"[^>]*>([^<]{1,20})', r.text):
+            cid = int(m.group(1))
+            name = m.group(2).strip()
+            if cid not in seen_ids and name:
+                seen_ids.add(cid)
+                cats.append((cid, name))
+    return cats
+
+
+def _wp_collect_articles(content_base, cat_slug, max_pages=MAX_PAGES_PER_CATEGORY):
+    """收集 WordPress 分类下所有文章 URL（自动分页）
+    分页格式: /category/{slug}/page/{N}/
+    """
+    all_arts = []
+    seen = set()
+    for page in range(1, max_pages + 1):
+        if page == 1:
+            url = f"{content_base}/category/{cat_slug}/"
+        else:
+            url = f"{content_base}/category/{cat_slug}/page/{page}/"
+        r = safe_request(url, timeout=20)
+        if not r or r.status_code != 200:
+            break
+        arts = re.findall(r'href="([^"]*?/archives/\d+/?[^"]*)"', r.text)
+        if not arts:
+            break
+        new_count = 0
+        for m in arts:
+            full = m if m.startswith('http') else content_base + m
+            if full not in seen:
+                seen.add(full)
+                all_arts.append(full)
+                new_count += 1
+        if new_count == 0:
+            break
+        time.sleep(CRAWL_DELAY)
+    return all_arts
+
+
+def _save_incremental(results, tag=''):
+    """增量保存结果到 video_results.json（防止长时间爬取中途崩溃丢失数据）"""
+    try:
+        with open(JSON_PATH, 'w', encoding='utf-8') as f:
+            json.dump(results, f, ensure_ascii=False, indent=2, default=str)
+        if tag:
+            print(f"  [增量保存] {tag}: {len(results)} 条 -> {JSON_PATH}")
+    except Exception as e:
+        print(f"  [!] 增量保存失败: {e}")
 
 
 def try_ytdlp(url):
@@ -207,14 +415,8 @@ def parse_site1():
         'https://bar.svqnsple.cc',
         'https://blanket.svqnsple.cc',
     ]
-    CATEGORIES = [
-        '/category/fljq/',   # 福利视频
-        '/category/thjx/',   # 探花经典
-        '/category/wyjd/',   # 午夜剧场
-        '/category/ntll/',   # 今日吃瓜
-    ]
-    ARTICLES_PER_CAT = 5
-    MAX_ARTICLES = 10
+    # 预置分类 + 从首页动态发现更多
+    KNOWN_CAT_SLUGS = ['fljq', 'thjx', 'wyjd', 'ntll']
 
     # ---- 1. 发现内容站 ----
     content_base = None
@@ -233,22 +435,26 @@ def parse_site1():
         content_base = FALLBACK_BASES[0]
         print(f"  [兜底] 直接使用内容站: {content_base}")
 
-    # ---- 2. 访问分类页，收集文章URL ----
-    all_arts = []
-    for cat in CATEGORIES:
-        cat_url = content_base + cat
-        resp = safe_request(cat_url)
-        if not resp or resp.status_code != 200:
-            print(f"  [分类] {cat} 访问失败")
-            continue
-        arts = list(dict.fromkeys(
-            m if m.startswith('http') else content_base + m
-            for m in re.findall(r'href="([^"]*?/archives/\d+/?[^"]*)"', resp.text)
-        ))
-        print(f"  [分类] {cat} -> {len(arts)} 篇")
-        all_arts.extend(arts[:ARTICLES_PER_CAT])
+    # ---- 1b. 从内容站首页发现所有分类 slug ----
+    cat_slugs = list(KNOWN_CAT_SLUGS)
+    home_resp = safe_request(content_base + '/', timeout=20)
+    if home_resp and home_resp.status_code == 200:
+        discovered = re.findall(r'href="[^"]*?/category/([a-z0-9_-]+)/?', home_resp.text, re.I)
+        for slug in discovered:
+            if slug not in cat_slugs:
+                cat_slugs.append(slug)
+    print(f"  [分类] 共 {len(cat_slugs)} 个: {cat_slugs}")
 
-    all_arts = list(dict.fromkeys(all_arts))[:MAX_ARTICLES]
+    # ---- 2. 逐分类分页收集文章URL ----
+    all_arts = []
+    for slug in cat_slugs:
+        arts = _wp_collect_articles(content_base, slug)
+        print(f"  [分类/{slug}] 共 {len(arts)} 篇文章")
+        all_arts.extend(arts)
+        if len(all_arts) >= MAX_ITEMS_PER_SITE:
+            print(f"  [!] 已达站点上限 {MAX_ITEMS_PER_SITE}，停止收集")
+            break
+    all_arts = list(dict.fromkeys(all_arts))[:MAX_ITEMS_PER_SITE]
     print(f"  [汇总] 待解析 {len(all_arts)} 篇文章")
 
     # ---- 3. 逐篇解析 DPlayer data-config ----
@@ -266,6 +472,11 @@ def parse_site1():
         html_text = resp.text
         video_url = None
         pic_url = None
+
+        # 提取封面图：优先 DPlayer video.pic，兜底 og:image / 文章特色图
+        og_m = re.search(r'<meta\s+property="og:image"\s+content="([^"]+)"', html_text, re.I)
+        if og_m:
+            pic_url = og_m.group(1).replace('&amp;', '&')
 
         # 找 dplayer div (可能有多个 class 变体)
         dp_match = re.search(r'<div[^>]*class="[^"]*dplayer[^"]*"[^>]*>', html_text, re.I)
@@ -347,13 +558,16 @@ def parse_site1():
             if g:
                 for v in g[:1]:
                     print(f"  [+] (通用) {title[:50]} -> {v['type']}: {v['url'][:120]}")
-                    results.append({'site': 'site1', 'title': title, 'source_url': aurl, **v})
+                    results.append({'site': 'site1', 'title': title, 'source_url': aurl, 'pic': pic_url, **v})
             else:
                 for yu in try_ytdlp(aurl)[:1]:
                     print(f"  [+] (yt-dlp) {title[:50]}")
                     results.append({'site': 'site1', 'title': title, 'source_url': aurl,
-                                    'type': 'ytdlp', 'url': yu})
-        time.sleep(0.3)
+                                    'type': 'ytdlp', 'url': yu, 'pic': pic_url})
+        time.sleep(CRAWL_DELAY)
+        # 每 20 条增量保存一次
+        if len(results) > 0 and len(results) % 20 == 0:
+            _save_incremental(results, f'site1-progress')
     return results
 
 
@@ -390,33 +604,42 @@ def parse_site2():
     elif resp.status_code == 200 and len(resp.text) > 5000:
         print(f"  [+] 首页正常! 长度={len(resp.text)}")
 
-    # ---- 2. 枚举分类页 (MacCMS 常见分类号 1-20, 144 对应国产) ----
-    play_links = []
-    for vodtype_id in [1, 2, 3, 4, 5, 10, 144, 145, 146, 147]:
-        list_url = f"{base}/vodtype/{vodtype_id}.html"
-        r = safe_request(list_url, timeout=15)
-        if not r or r.status_code != 200 or '521' in r.text[:300]:
-            continue
-        found = list(dict.fromkeys(
-            urljoin(r.url, m) for m in re.findall(r'href="(/vodplay/\d+-\d+-\d+\.html)"', r.text)
-        ))
-        print(f"  [分类/vodtype/{vodtype_id}] 发现 {len(found)} 个播放页")
-        play_links.extend(found[:5])
-        if len(play_links) >= 8:
+    # ---- 2. 发现分类 + 分页收集播放链接(含封面) ----
+    cats = _discover_maccms_categories(base)
+    print(f"  [分类] 共 {len(cats)} 个: {cats[:20]}")
+    play_items = []
+    for cid, cname in cats:
+        found = _maccms_collect_play_links(base, cid)
+        if found:
+            cover_count = sum(1 for f in found if f.get('cover'))
+            print(f"  [分类/vodtype/{cid}({cname})] 发现 {len(found)} 个播放页 (封面 {cover_count}/{len(found)})")
+            play_items.extend(found)
+        if len(play_items) >= MAX_ITEMS_PER_SITE:
+            print(f"  [!] 已达站点上限 {MAX_ITEMS_PER_SITE}")
             break
+    play_items = play_items[:MAX_ITEMS_PER_SITE]
 
     # ---- 3. 兜底 (若分类页因521失败, 枚举几个常见播放页直接试) ----
-    if not play_links:
+    if not play_items:
         print("  [*] 因521无法获取列表, 兜底尝试常见播放页ID...")
         common_ids = list(range(70900, 71050, 5)) + list(range(69000, 69200, 10))
-        for vid in common_ids[:10]:
-            play_links.append(f"{base}/vodplay/{vid}-1-1.html")
+        for vid in common_ids[:20]:
+            play_items.append({'url': f"{base}/vodplay/{vid}-1-1.html", 'cover': ''})
 
     # ---- 4. 逐个解析播放页 ----
-    for purl in play_links[:8]:
+    print(f"  [解析] 共 {len(play_items)} 个播放页待解析")
+    for item in play_items:
+        purl = item['url']
         res = _parse_maccms_single(purl, expected_site='site2')
         if res:
+            if item.get('cover') and not res.get('pic'):
+                res['pic'] = item['cover']
             results.append(res)
+            if len(results) % 20 == 0:
+                _save_incremental(results, f'site2-progress')
+        if len(results) >= MAX_ITEMS_PER_SITE:
+            break
+        time.sleep(CRAWL_DELAY)
 
     if not results:
         print("  [-] 当前未能从 actress.llbieya.cc 提取视频 (源站521)")
@@ -514,12 +737,26 @@ def _parse_maccms_single(play_url, expected_site='site3'):
         if '.m3u8' in video_type: video_type = 'm3u8'
         elif '.m3u8' in video_url: video_type = 'm3u8'
         elif '.mp4' in video_url: video_type = 'mp4'
+
+        # 提取封面图：player_cfg 中的 pic/vod_pic/poster 字段，兜底 og:image
+        pic_url = ''
+        if isinstance(player_cfg, dict):
+            for pk in ['pic', 'vod_pic', 'poster', 'thumbnail', 'cover']:
+                pv = player_cfg.get(pk)
+                if isinstance(pv, str) and pv.startswith('http'):
+                    pic_url = pv; break
+        if not pic_url:
+            og_m = re.search(r'<meta\s+property="og:image"\s+content="([^"]+)"', html, re.I)
+            if og_m:
+                pic_url = og_m.group(1).replace('&amp;', '&')
+
         return {
             'site': expected_site,
             'title': title or f'{expected_site}-video',
             'source_url': play_url,
             'type': video_type,
             'url': video_url,
+            'pic': pic_url,
         }
     # 最后 yt-dlp
     ytu = try_ytdlp(play_url)
@@ -537,27 +774,39 @@ def parse_site3():
     print("【站点3】yp262.com  (AES-ECB + SHA256 已验证)")
     print("="*70)
     results = []
-    
-    # 1. 获取列表
-    list_url = 'https://www.yp262.com/vodtype/144.html'
-    rlist = safe_request(list_url)
-    if not rlist:
-        print("  [-] 列表页访问失败")
-        return results
-    
-    play_links = list(dict.fromkeys(
-        urljoin(rlist.url, m) for m in re.findall(r'href="(/vodplay/\d+-\d+-\d+\.html)"', rlist.text)
-    ))
-    print(f"  [+] 分类页发现播放链接: {len(play_links)} 个")
-    for pl in play_links[:10]:
-        print(f"      {pl}")
-    
+    base = 'https://www.yp262.com'
+
+    # 1. 发现所有分类 + 分页收集播放链接(含封面)
+    cats = _discover_maccms_categories(base, extra_ids=[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 144, 145, 146, 147, 148, 149, 150])
+    print(f"  [分类] 共 {len(cats)} 个: {cats[:20]}")
+
+    play_items = []
+    for cid, cname in cats:
+        found = _maccms_collect_play_links(base, cid)
+        if found:
+            cover_count = sum(1 for f in found if f.get('cover'))
+            print(f"  [分类/vodtype/{cid}({cname})] 发现 {len(found)} 个播放页 (封面 {cover_count}/{len(found)})")
+            play_items.extend(found)
+        if len(play_items) >= MAX_ITEMS_PER_SITE:
+            print(f"  [!] 已达站点上限 {MAX_ITEMS_PER_SITE}")
+            break
+    play_items = play_items[:MAX_ITEMS_PER_SITE]
+    print(f"  [汇总] 共 {len(play_items)} 个播放页待解析")
+
     # 2. 逐个解析
-    for purl in play_links[:8]:
+    for item in play_items:
+        purl = item['url']
         res = parse_yp262_single(purl)
         if res:
+            if item.get('cover') and not res.get('pic'):
+                res['pic'] = item['cover']
             results.append(res)
-    
+            if len(results) % 20 == 0:
+                _save_incremental(results, f'site3-progress')
+        if len(results) >= MAX_ITEMS_PER_SITE:
+            break
+        time.sleep(CRAWL_DELAY)
+
     return results
 
 
@@ -580,7 +829,14 @@ def parse_yp262_single(play_url):
         # 降级到通用提取
         vids = extract_videos_generic(html, play_url)
         if vids:
-            return {'site': 'site3', 'title': title_enc, 'source_url': play_url, **vids[0]}
+            _fb = ''
+            _og = re.search(r'<meta\s+property="og:image"\s+content="([^"]+)"', html, re.I)
+            if _og:
+                _fb = _og.group(1).replace('&amp;', '&')
+                if _fb.startswith('//'):
+                    _fb = 'https:' + _fb
+            return {'site': 'site3', 'title': title_enc, 'source_url': play_url,
+                    'pic': _fb, **vids[0]}
         return None
     
     crypt_key = ck_m.group(1)
@@ -687,18 +943,43 @@ def parse_yp262_single(play_url):
                 video_type = 'm3u8'
             elif '.mp4' in video_url:
                 video_type = 'mp4'
-            
+
+            # 提取封面图：player_cfg 中的 pic/vod_pic/poster 等字段，兜底 og:image
+            pic_url = ''
+            if isinstance(player_cfg, dict):
+                for pk in ['pic', 'vod_pic', 'poster', 'thumbnail', 'cover']:
+                    pv = player_cfg.get(pk)
+                    if isinstance(pv, str) and (pv.startswith('http') or pv.startswith('//')):
+                        pic_url = pv
+                        break
+            if not pic_url:
+                og_m = re.search(r'<meta\s+property="og:image"\s+content="([^"]+)"', html, re.I)
+                if og_m:
+                    pic_url = og_m.group(1).replace('&amp;', '&')
+            if pic_url.startswith('//'):
+                pic_url = 'https:' + pic_url
+
             print(f"    [+] 视频源: {video_type} -> {video_url[:180]}")
+            if pic_url:
+                print(f"    [+] 封面图: {pic_url[:120]}")
             return {
                 'site': 'site3',
                 'title': title or 'yp262-video',
                 'source_url': play_url,
                 'type': video_type,
                 'url': video_url,
+                'pic': pic_url,
                 'player_keys': list(player_cfg.keys()) if isinstance(player_cfg, dict) else None,
             }
         else:
             print(f"    [-] 未能在player配置中找到视频URL")
+            # 兜底封面：og:image
+            _fb_pic = ''
+            _og = re.search(r'<meta\s+property="og:image"\s+content="([^"]+)"', html, re.I)
+            if _og:
+                _fb_pic = _og.group(1).replace('&amp;', '&')
+                if _fb_pic.startswith('//'):
+                    _fb_pic = 'https:' + _fb_pic
             # 尝试找 player.js / 外部JS 里的播放逻辑
             play_js_urls = re.findall(r'<script[^>]+src="([^"]*player[^"]*\.js[^"]*)"', html, re.I)
             for ju in play_js_urls[:3]:
@@ -710,12 +991,14 @@ def parse_yp262_single(play_url):
                     if m3u8s:
                         print(f"      [+] JS中发现m3u8: {m3u8s[0][:150]}")
                         return {'site': 'site3', 'title': title or 'yp262-video',
-                                'source_url': play_url, 'type': 'm3u8', 'url': m3u8s[0]}
+                                'source_url': play_url, 'type': 'm3u8', 'url': m3u8s[0],
+                                'pic': _fb_pic}
             # 最后yt-dlp兜底
             ytu = try_ytdlp(play_url)
             if ytu:
                 return {'site': 'site3', 'title': title or 'yp262-video',
-                        'source_url': play_url, 'type': 'ytdlp', 'url': ytu[0]}
+                        'source_url': play_url, 'type': 'ytdlp', 'url': ytu[0],
+                        'pic': _fb_pic}
     
     except Exception as e:
         import traceback
@@ -730,18 +1013,37 @@ def parse_yp262_single(play_url):
 # ============================================================
 def main():
     print("="*70)
-    print("   三站点视频爬虫 - 最终版")
+    print("   三站点视频爬虫 - 最终版 (全量抓取)")
     print("   yp262 AES解密算法:  ECB / SHA256(key) / Pkcs7")
+    print(f"   规模: 不限流全量抓取 (列表页无新链接则停止)")
     print("="*70)
     print(f"   pycryptodome: {'✓' if HAS_PYCRYPTODOME else '✗'}")
     print(f"   yt-dlp:        {'✓' if HAS_YTDLP else '✗'}")
     print(f"   下载目录:      {DOWNLOAD_DIR}")
-    
+
     all_results = []
-    all_results.extend(parse_site1())
-    all_results.extend(parse_site2())
-    all_results.extend(parse_site3())
-    
+
+    # 逐站点抓取，每站完成后增量保存
+    for site_fn, tag in [(parse_site1, 'site1'), (parse_site2, 'site2'), (parse_site3, 'site3')]:
+        try:
+            site_results = site_fn()
+            all_results.extend(site_results)
+            print(f"\n  [{tag}] 完成: {len(site_results)} 条, 累计 {len(all_results)} 条")
+            _save_incremental(all_results, f'after-{tag}')
+        except Exception as e:
+            print(f"\n  [{tag}] 异常: {e}, 已保存当前结果")
+            _save_incremental(all_results, f'after-{tag}-error')
+
+    # 全局去重（按视频 URL）
+    seen_urls = set()
+    deduped = []
+    for r in all_results:
+        u = r.get('url', '')
+        if u and u not in seen_urls:
+            seen_urls.add(u)
+            deduped.append(r)
+    all_results = deduped
+
     print("\n" + "="*70)
     print("  最终汇总")
     print("="*70)
@@ -752,23 +1054,26 @@ def main():
         print("   2. pip install pycryptodome yt-dlp ffmpeg-python")
         print("   3. 安装 ffmpeg (系统包管理器 apt install ffmpeg)")
         return
-    
-    print(f"  共提取 {len(all_results)} 个视频源：\n")
-    for i, r in enumerate(all_results, 1):
-        t = r.get('title', 'N/A')[:70]
+
+    # 按站点统计
+    from collections import Counter
+    site_counts = Counter(r.get('site', '?') for r in all_results)
+    type_counts = Counter(r.get('type', '?') for r in all_results)
+    print(f"  共提取 {len(all_results)} 个视频源 (已去重)")
+    print(f"  按站点: {dict(site_counts)}")
+    print(f"  按类型: {dict(type_counts)}")
+    for i, r in enumerate(all_results[:20], 1):
+        t = r.get('title', 'N/A')[:60]
         s = r.get('site', '?')
         vt = r.get('type', '?')
-        u = r.get('url', '')[:180]
-        print(f" [{i:2d}] site{s}  [{vt}]  {t}")
-        print(f"       来源: {r.get('source_url','')}")
-        print(f"       地址: {u}\n")
-    
+        print(f" [{i:2d}] {s} [{vt}] {t}")
+    if len(all_results) > 20:
+        print(f"  ... 共 {len(all_results)} 条，仅显示前 20 条")
+
     # 保存JSON
-    json_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'video_results.json')
-    with open(json_path, 'w', encoding='utf-8') as f:
-        json.dump(all_results, f, ensure_ascii=False, indent=2, default=str)
-    print(f"[+] 结果已保存 -> {json_path}")
-    
+    _save_incremental(all_results, 'final')
+    print(f"[+] 结果已保存 -> {JSON_PATH}")
+
     # 演示下载: 第一个m3u8
     m3u8_list = [r for r in all_results if r.get('type') == 'm3u8']
     if m3u8_list:

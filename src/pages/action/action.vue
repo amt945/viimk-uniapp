@@ -9,7 +9,6 @@
       <view class="icon-btn"></view>
     </view>
 
-    <!-- 列表：scroll-view 高度 hack + 触底加载 -->
     <scroll-view
       ref="actScrollView"
       class="page-content"
@@ -31,32 +30,50 @@
         </template>
 
         <template v-else>
-          <view class="grid">
-            <view
-              v-for="item in list"
-              :key="item.id"
-              class="thumb-card"
-              @tap="goDetail(item)"
-            >
-              <view class="thumb-img">
-                <image class="thumb-img-inner" :src="item.cover" mode="aspectFill" />
-                <view class="rating-badge">
-                  <text class="rating-text">{{ item.rating || item.score || '0.0' }}</text>
+          <!-- 错误态：接口拉取失败且无缓存 -->
+          <view v-if="errMsg && !list.length" class="error-state">
+            <VmkIcon name="play" :size="64" color="#3A3A45" />
+            <text class="error-text">{{ errMsg }}</text>
+            <view class="retry-btn" @tap="loadList(true)">
+              <text class="retry-text">重试</text>
+            </view>
+          </view>
+
+          <template v-else>
+            <view class="grid">
+              <view
+                v-for="item in list"
+                :key="item.id"
+                class="thumb-card"
+                @tap="goDetail(item)"
+              >
+                <view class="thumb-img">
+                  <image
+                    v-if="item.cover"
+                    class="thumb-img-inner"
+                    :src="item.cover"
+                    mode="aspectFill"
+                  />
+                  <view v-else class="thumb-img-placeholder">
+                    <VmkIcon name="play" :size="36" color="#6B7280" />
+                  </view>
+                  <view class="type-badge">
+                    <text class="type-text">{{ item.videoType || 'MP4' }}</text>
+                  </view>
                 </view>
+                <text class="thumb-title ellipsis">{{ item.title }}</text>
+                <text class="thumb-meta ellipsis">{{ item.site || '动作片' }}</text>
               </view>
-              <text class="thumb-title ellipsis">{{ item.title }}</text>
-              <text class="thumb-meta ellipsis">{{ item.meta || (item.year + ' · ' + (item.area || '')) }}</text>
             </view>
-          </view>
-          <!-- 列表底部状态 -->
-          <view class="list-footer">
-            <view v-if="listLoading" class="list-footer-loading">
-              <view class="mini-spinner"></view>
-              <text class="list-footer-text">加载中…</text>
+            <view class="list-footer">
+              <view v-if="listLoading" class="list-footer-loading">
+                <view class="mini-spinner"></view>
+                <text class="list-footer-text">加载中…</text>
+              </view>
+              <text v-else-if="!hasMore && list.length" class="list-footer-text">没有更多了</text>
+              <text v-else-if="!list.length && !listLoading" class="list-footer-text">暂无数据</text>
             </view>
-            <text v-else-if="!hasMore && list.length" class="list-footer-text">没有更多了</text>
-            <text v-else-if="!list.length && !listLoading" class="list-footer-text">暂无数据</text>
-          </view>
+          </template>
         </template>
 
         <view class="bottom-spacer"></view>
@@ -68,7 +85,7 @@
 <script>
 import StatusBar from '@/components/StatusBar.vue'
 import VmkIcon from '@/components/VmkIcon.vue'
-import { fetchActionListPaged, navigateToPlayer } from '@/api/index.js'
+import { fetchActionList } from '@/api/index.js'
 
 export default {
   name: 'Action',
@@ -78,118 +95,116 @@ export default {
       loading: true,
       list: [],
       page: 1,
-      hasMore: true,
+      pagecount: 1,
+      hasMore: false,
       listLoading: false,
       initialized: false,
-      _autoLoadCount: 0
+      errMsg: ''
     }
   },
   async onShow() {
     if (!this.initialized) {
-      // 尝试从缓存恢复
       if (this._restoreFromStorage()) {
         this.initialized = true
         this.loading = false
-        this.loadList(true, true)
+        this.loadList(true)
         return
       }
       await this.loadList(true)
     } else {
-      await this.loadList(true, true)
+      await this.loadList(true)
     }
   },
   methods: {
-    _restoreFromStorage() {
+    // 兼容 storage：优先 localStorage（WebView 原生），兜底 uni.storage
+    _cacheGet() {
       try {
-        const raw = uni.getStorageSync('vmk_action_cache')
-        if (!raw) return false
-        const cache = typeof raw === 'string' ? JSON.parse(raw) : raw
-        if (!cache || !cache.list || !cache.list.length) return false
-        if (cache.t && (Date.now() - cache.t) > 2 * 60 * 60 * 1000) return false
-        this.list = cache.list
-        this.page = 2
-        this.hasMore = cache.hasMore !== false
-        return true
-      } catch (e) {
-        return false
-      }
+        if (typeof window !== 'undefined' && window.localStorage) {
+          const raw = window.localStorage.getItem('vmk_action_cache')
+          if (raw != null) return JSON.parse(raw)
+        }
+      } catch (e) {}
+      try {
+        if (typeof uni !== 'undefined' && uni.getStorageSync) {
+          const v = uni.getStorageSync('vmk_action_cache')
+          if (v) return typeof v === 'string' ? JSON.parse(v) : v
+        }
+      } catch (e) {}
+      return null
+    },
+    _cacheSet(data) {
+      try {
+        if (typeof window !== 'undefined' && window.localStorage) {
+          window.localStorage.setItem('vmk_action_cache', JSON.stringify(data))
+        }
+      } catch (e) {}
+      try { if (typeof uni !== 'undefined' && uni.setStorageSync) uni.setStorageSync('vmk_action_cache', data) } catch (e) {}
+    },
+    _restoreFromStorage() {
+      const cache = this._cacheGet()
+      if (!cache || !cache.list || !cache.list.length) return false
+      // 缓存超过 6 小时视为过期
+      if (cache.t && (Date.now() - cache.t) > 6 * 60 * 60 * 1000) return false
+      this.list = cache.list
+      this.page = cache.page || 1
+      this.pagecount = cache.pagecount || 1
+      // 恢复 hasMore：缓存可能不完整，保守设为 true 让触底能继续尝试
+      // 若已是最后一页则后端返回空列表 + hasMore=false，前端自然停止
+      this.hasMore = this.page < this.pagecount
+      return true
     },
     _saveToStorage() {
-      try {
-        uni.setStorageSync('vmk_action_cache', {
-          list: this.list,
-          hasMore: this.hasMore,
-          t: Date.now()
-        })
-      } catch (e) {}
+      this._cacheSet({ list: this.list, page: this.page, pagecount: this.pagecount, t: Date.now() })
     },
-    async loadList(reset = false, silent = false) {
+    async loadList(reset = false) {
       if (this.listLoading) return
+      // 触底追加时，没有下一页则不请求
       if (!reset && !this.hasMore) return
       this.listLoading = true
-      if (reset) {
-        this.page = 1
-        this.hasMore = true
-        if (!silent) this.list = []
-        this._autoLoadCount = 0
-      }
-      const targetPg = this.page
-      const res = await fetchActionListPaged(targetPg)
+      this.errMsg = ''
+      const pg = reset ? 1 : this.page + 1
+      const res = await fetchActionList(pg)
       if (res && Array.isArray(res.list)) {
-        if (res.list.length) {
-          this.list = reset ? res.list : this.list.concat(res.list)
-          this.hasMore = res.list.length >= 20 ? !!res.hasMore : false
-          if (this.hasMore) {
-            this.page = (res.page || targetPg) + 1
-          }
-          if (reset) this._saveToStorage()
-        } else if (reset) {
-          if (!silent) this.list = []
-          this.hasMore = false
+        if (reset) {
+          this.list = res.list
         } else {
-          this.hasMore = false
+          // 追加：按 id 去重，避免边界重复
+          const ids = new Set(this.list.map(i => i.id))
+          this.list = this.list.concat(res.list.filter(i => !ids.has(i.id)))
         }
+        this.page = res.page || pg
+        this.pagecount = res.pagecount || 1
+        this.hasMore = res.hasMore
+        this._saveToStorage()
+      } else if (reset && !this.list.length) {
+        // 首屏无缓存且拉取失败 → 显示错误态
+        this.errMsg = '数据加载失败，请检查网络后重试'
       }
       this.listLoading = false
       this.initialized = true
       if (reset) {
         this.loading = false
-        this.$nextTick(() => {
-          setTimeout(() => this._ensureScrollable(), 50)
-        })
       }
     },
     onScrollToLower() {
-      if (this.listLoading || !this.hasMore || !this.initialized) return
-      this.loadList(false)
-    },
-    _ensureScrollable() {
-      if (this._autoLoadCount >= 3) return
-      if (!this.$el || !this.$el.querySelector) return
-      let sv = this.$el.querySelector('.page-content .uni-scroll-view-scrollbar-hidden')
-      if (!sv) {
-        const outer = this.$el.querySelector('.page-content > div')
-        sv = outer && outer.querySelector(':scope > div') ? outer.querySelector(':scope > div') : null
-      }
-      if (!sv) sv = this.$el.querySelector('.page-content .uni-scroll-view')
-      if (!sv) sv = this.$refs.actScrollView && this.$refs.actScrollView.$el ? this.$refs.actScrollView.$el : null
-      if (!sv) sv = this.$el.querySelector('.page-content')
-      if (!sv) return
-      const sh = sv.scrollHeight || 0
-      const ch = sv.clientHeight || 0
-      const canScroll = sh > ch + 10
-      if (!canScroll && this.hasMore && !this.listLoading && this.list.length > 0) {
-        this._autoLoadCount++
-        this.loadList(false).then(() => {
-          this.$nextTick(() => {
-            setTimeout(() => this._ensureScrollable(), 50)
-          })
-        })
+      // 触底加载下一页
+      if (this.hasMore && !this.listLoading) {
+        this.loadList(false)
       }
     },
-    goDetail(itemOrId) {
-      if (!itemOrId) return
-      navigateToPlayer(itemOrId)
+    goDetail(item) {
+      if (!item || !item.url) {
+        uni.showToast({ title: '暂无可播放地址', icon: 'none' })
+        return
+      }
+      // 直接带 url 跳播放页，播放器会自动检测视频方向切换布局
+      const params = [
+        'url=' + encodeURIComponent(item.url),
+        'title=' + encodeURIComponent(item.title || ''),
+        'contentType=action'
+      ]
+      if (item.cover) params.push('poster=' + encodeURIComponent(item.cover))
+      uni.navigateTo({ url: '/pages/player/player?' + params.join('&') })
     },
     goBack() {
       const pages = getCurrentPages()
@@ -229,7 +244,6 @@ export default {
   justify-content: center;
 }
 
-/* scroll-view 高度 hack */
 .page-content {
   flex: 1 1 auto;
   height: 0;
@@ -263,18 +277,27 @@ export default {
   width: 100%;
   height: 100%;
 }
-.rating-badge {
+.thumb-img-placeholder {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background-color: var(--vmk-muted-bg);
+}
+.type-badge {
   position: absolute;
   top: 12rpx;
-  left: 12rpx;
+  right: 12rpx;
   padding: 2rpx 10rpx;
   border-radius: var(--vmk-radius-sm);
-  background-color: var(--vmk-warning);
+  background-color: rgba(0, 0, 0, 0.6);
 }
-.rating-text {
+.type-text {
   font-size: 20rpx;
-  font-weight: 700;
-  color: var(--vmk-foreground);
+  font-weight: 600;
+  color: #FFFFFF;
+  text-transform: uppercase;
 }
 .thumb-title {
   margin-top: 12rpx;
@@ -293,7 +316,6 @@ export default {
   height: 32rpx;
 }
 
-/* 列表底部加载状态 */
 .list-footer {
   display: flex;
   align-items: center;
@@ -322,7 +344,6 @@ export default {
   color: var(--vmk-muted);
 }
 
-/* 骨架屏 */
 .skeleton {
   position: relative;
   background-color: var(--vmk-card);
@@ -352,4 +373,29 @@ export default {
   margin-top: 12rpx;
 }
 .text-skeleton.short { width: 60%; }
+
+.error-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 120rpx 40rpx;
+  gap: 24rpx;
+}
+.error-text {
+  font-size: var(--vmk-text-sm);
+  color: var(--vmk-muted);
+  text-align: center;
+  line-height: 1.5;
+}
+.retry-btn {
+  padding: 16rpx 56rpx;
+  border-radius: var(--vmk-radius-md);
+  background-color: var(--vmk-primary);
+}
+.retry-text {
+  font-size: var(--vmk-text-sm);
+  font-weight: 600;
+  color: #FFFFFF;
+}
 </style>

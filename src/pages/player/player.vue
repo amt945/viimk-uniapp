@@ -411,6 +411,9 @@
     <!-- 更多操作弹窗 -->
     <view v-if="showMoreMenu" class="modal-mask" @tap="showMoreMenu = false">
       <view class="modal-list" @tap.stop>
+        <view class="modal-item" @tap="addToOffline">
+          <text class="modal-item-text">加入缓存</text>
+        </view>
         <view class="modal-item" @tap="copyLink">
           <text class="modal-item-text">复制链接</text>
         </view>
@@ -427,7 +430,7 @@
 
 <script>
 import VmkIcon from '@/components/VmkIcon.vue'
-import { fetchOnlineDetail, fetchOnlineResolve, toggleFavorite, isFavorited } from '@/api/index.js'
+import { fetchOnlineDetail, fetchOnlineResolve, toggleFavorite, isFavorited, updateHistory, addOfflineItem } from '@/api/index.js'
 
 const IS_H5 = true  // App 端也是 WebView，统一使用 H5 播放方案
 
@@ -454,6 +457,7 @@ export default {
       _hls: null,
       _h5Video: null,
       _resolved: false,
+      _orientationDetected: false,
       mutedAuto: true,
       isMuted: true,
       needTapPlay: false,
@@ -529,6 +533,10 @@ export default {
     if (IS_H5) {
       this.$nextTick(() => this._createH5Video())
     }
+    // 调试/预览环境：暴露组件实例到全局，便于手动调用方法验证
+    if (typeof window !== 'undefined') {
+      try { window.__vmkPlayer = this } catch (_) {}
+    }
     // 监听原生 Android 返回键触发的退出全屏事件
     if (typeof window !== 'undefined') {
       this._onNativeExitFs = () => {
@@ -540,6 +548,30 @@ export default {
       window.addEventListener('viimkExitFullscreen', this._onNativeExitFs)
       window.__vmkExitFullscreen = this._onNativeExitFs
     }
+    // 监听页面可见性变化（手机息屏/切后台 → 亮屏恢复）
+    // Android WebView 息屏时会自动暂停 video，亮屏后需手动恢复播放
+    if (typeof document !== 'undefined') {
+      this._onVisibilityChange = () => {
+        if (document.hidden) {
+          // 息屏/切后台：记录播放状态，暂停视频（不销毁，保留进度）
+          this._wasPlayingBeforeHidden = this.isPlaying
+          const v = this._h5Video
+          if (v && !v.paused) {
+            try { v.pause() } catch (e) {}
+          }
+        } else {
+          // 亮屏/恢复：如果之前在播放，恢复播放
+          if (this._wasPlayingBeforeHidden) {
+            this._wasPlayingBeforeHidden = false
+            // 延迟 300ms 确保 WebView 完全恢复后再 play
+            setTimeout(() => {
+              this._resumePlayback()
+            }, 300)
+          }
+        }
+      }
+      document.addEventListener('visibilitychange', this._onVisibilityChange)
+    }
   },
   beforeUnmount() {
     // 离开播放页前恢复竖屏，避免别的页面也是横屏
@@ -549,6 +581,10 @@ export default {
       if (window.__vmkExitFullscreen === this._onNativeExitFs) {
         window.__vmkExitFullscreen = null
       }
+    }
+    if (typeof document !== 'undefined' && this._onVisibilityChange) {
+      document.removeEventListener('visibilitychange', this._onVisibilityChange)
+      this._onVisibilityChange = null
     }
   },
   updated() {
@@ -581,6 +617,8 @@ export default {
     }
     if (this.rawUrl) {
       this.isDirect = this._isDirectUrl(this.rawUrl)
+      // action / 直接 url 模式：先判断是否已收藏
+      this.isFavorited = isFavorited('', '', this.rawUrl)
       this.startPlayUrl(this.rawUrl)
     }
   },
@@ -594,9 +632,36 @@ export default {
         window.__vmkExitFullscreen = null
       }
     }
+    if (typeof document !== 'undefined' && this._onVisibilityChange) {
+      document.removeEventListener('visibilitychange', this._onVisibilityChange)
+      this._onVisibilityChange = null
+    }
   },
   onHide() {
+    // 页面被覆盖（跳转其他页面）：记录播放状态后销毁，onShow 时重建恢复
+    this._wasPlayingBeforeHide = this.isPlaying
+    this._resumeTime = this.currentTime || 0
+    this._suspendedByHide = true
     this.destroyHls()
+  },
+  onShow() {
+    // 从其他页面返回：如果 onHide 销毁了播放器，重建并恢复到之前的进度
+    if (this._suspendedByHide) {
+      this._suspendedByHide = false
+      const wasPlaying = this._wasPlayingBeforeHide
+      const resumeTime = this._resumeTime || 0
+      this._wasPlayingBeforeHide = false
+      this._resumeTime = 0
+      // 重置 resolved 标志，强制重新解析（避免复用已失效的地址）
+      this._resolved = false
+      this._pendingResumeTime = resumeTime
+      this._pendingAutoPlay = wasPlaying
+      if (this.vodId && this.episodes.length) {
+        this.playEpisode(this.currentEpIdx)
+      } else if (this.rawUrl) {
+        this.startPlayUrl(this.rawUrl)
+      }
+    }
   },
   methods: {
     _isDirectUrl(url) {
@@ -653,7 +718,29 @@ export default {
       const v = this._h5Video
       if (!v) return
       if (v.paused) {
-        v.play().catch(() => {})
+        // 用户点击播放按钮（手势上下文）：优先尝试解除静音出声
+        const needTapPlay = this.needTapPlay
+        this.needTapPlay = false
+        const tryWithSound = () => {
+          if (this.mutedAuto && v.muted) {
+            v.muted = false
+            this.isMuted = false
+            this.mutedAuto = false
+          }
+          return v.play()
+        }
+        tryWithSound().catch((e) => {
+          // 浏览器策略阻止有声音播放：静音重试（不丢失自动播放）
+          if (e && (e.name === 'NotAllowedError' || e.name === 'AbortError')) {
+            v.muted = true
+            this.isMuted = true
+            this.mutedAuto = true
+            v.play().catch(() => {
+              // 连静音播放都被阻止（需要用户手势）→ 显示点击播放
+              this.needTapPlay = needTapPlay !== false
+            })
+          }
+        })
       } else {
         v.pause()
       }
@@ -901,19 +988,71 @@ export default {
       if (!v.muted) v.play().catch(() => {})
     },
     async toggleFavorite() {
-      if (!this.vodId) {
+      const hasVodId = !!this.vodId
+      const hasUrl = !!this.rawUrl
+      if (!hasVodId && !hasUrl) {
         uni.showToast({ title: '暂无可收藏内容', icon: 'none' })
         return
       }
       const res = await toggleFavorite({
         vodId: this.vodId,
         onlineSite: this.siteKey || 'ffzy',
+        url: this.rawUrl || '',
         title: this.detail ? this.detail.title : this.playTitle,
         cover: this.detail ? this.detail.cover : this.poster,
-        meta: this.detail ? this.detail.remarks : ''
+        meta: this.detail ? this.detail.remarks : (this.contentType || ''),
+        contentType: this.contentType || ''
       })
       this.isFavorited = !!(res && res.favorited)
       uni.showToast({ title: this.isFavorited ? '已收藏' : '已取消收藏', icon: 'none' })
+    },
+    // 写入历史记录（每次开始播放 1.5s 后调用一次）
+    _savePlayHistory() {
+      const id = this.vodId
+        ? (this.siteKey || 'ffzy') + ':' + this.vodId + ':' + this.currentEpIdx
+        : (this.rawUrl ? 'action:' + this.rawUrl : '')
+      if (!id) return
+      const ep = this.episodes[this.currentEpIdx]
+      updateHistory({
+        id,
+        vodId: this.vodId || '',
+        onlineSite: this.siteKey || '',
+        url: this.rawUrl || (ep && ep.url) || '',
+        title: this.detail ? this.detail.title : this.playTitle,
+        cover: this.detail ? this.detail.cover : this.poster,
+        meta: this.detail
+          ? (this.detail.year || '') + (this.detail.year && this.detail.area ? ' · ' : '') + (this.detail.area || '') +
+            (this.detail.genre ? ' · ' + this.detail.genre : '')
+          : (this.contentType || '动作片'),
+        remarks: this.detail ? (this.detail.remarks || '') : '',
+        contentType: this.contentType || '',
+        episode: (ep && ep.name) ? ep.name : '',
+        episodeIndex: this.currentEpIdx
+      }).catch(() => {})
+    },
+    // 加入离线缓存（仅登记下载记录，不做实际下载）
+    async addToOffline() {
+      const id = this.vodId
+        ? (this.siteKey || 'ffzy') + ':' + this.vodId
+        : (this.rawUrl ? 'action:' + this.rawUrl : '')
+      if (!id) {
+        uni.showToast({ title: '暂无可缓存内容', icon: 'none' })
+        return
+      }
+      const ok = await addOfflineItem({
+        id,
+        url: this.rawUrl || '',
+        title: this.detail ? this.detail.title : this.playTitle,
+        cover: this.detail ? this.detail.cover : this.poster,
+        meta: this.detail
+          ? (this.detail.remarks || '') + (this.episodes.length ? ' · 全' + this.episodes.length + '集' : '')
+          : (this.contentType || '动作片'),
+        size: this.duration ? Math.round(this.duration * 0.2 / 1024 / 1024) + 'MB' : '未知'
+      })
+      this.showMoreMenu = false
+      if (ok) {
+        uni.showToast({ title: '已加入下载队列', icon: 'none' })
+      }
     },
     copyLink() {
       const url = window.location.href
@@ -967,7 +1106,12 @@ export default {
           this.isPlaying = !video.paused
         }
       })
-      video.addEventListener('play', () => { this.isPlaying = true })
+      video.addEventListener('play', () => {
+        this.isPlaying = true
+        // 开始播放后写入历史记录（防抖，避免频繁 seek 触发多次）
+        clearTimeout(this._historyDebounce)
+        this._historyDebounce = setTimeout(() => this._savePlayHistory(), 1500)
+      })
       video.addEventListener('pause', () => { this.isPlaying = false })
       video.addEventListener('ratechange', () => {})
       // 播完自动播放下一集（ended 事件在 HLS.js 暂停/恢复后可能不触发，作兜底）
@@ -982,6 +1126,34 @@ export default {
       })
       video.addEventListener('loadedmetadata', () => {
         this.duration = video.duration || 0
+        // 动作片：根据视频方向自动切换布局
+        // 横向视频(width > height) → 电影模式；竖向视频(height > width) → 短剧模式
+        if (this.contentType === 'action' && !this._orientationDetected) {
+          this._orientationDetected = true
+          const vw = video.videoWidth || 0
+          const vh = video.videoHeight || 0
+          if (vw > 0 && vh > 0) {
+            if (vh > vw) {
+              // 竖向视频 → 短剧模式
+              this.contentType = 'shorts'
+              this._h5Video.style.objectFit = 'cover'
+              console.log('[player] action video is vertical → shorts mode')
+            } else {
+              // 横向视频 → 电影模式
+              this.contentType = ''
+              console.log('[player] action video is horizontal → movie mode')
+            }
+            // 强制重新渲染模板（isShorts 计算属性会跟随更新）
+            this.$forceUpdate()
+          }
+        }
+        // 从其他页面返回时恢复到之前的播放进度
+        if (this._pendingResumeTime && this._pendingResumeTime > 1) {
+          try {
+            video.currentTime = this._pendingResumeTime
+          } catch (e) {}
+          this._pendingResumeTime = 0
+        }
       })
       video.addEventListener('durationchange', () => {
         this.duration = video.duration || 0
@@ -1016,7 +1188,7 @@ export default {
           this.poster = d.cover || this.poster
           const line = this.currentLine
           this.episodes = (line && line.eps) || []
-          this.isFavorited = isFavorited(this.vodId, this.siteKey)
+          this.isFavorited = isFavorited(this.vodId, this.siteKey, this.rawUrl)
           // 兜底：URL 未传 contentType 时，根据详情自动识别短剧并修正布局
           if (!this.contentType && d) {
             const detailType = (d.contentType || '') + ''
@@ -1085,6 +1257,8 @@ export default {
       this.buffered = 0
       // 重置自动播放下一集标志位，允许本次播放结束后再次触发
       this._autoNextTriggered = false
+      // 重置视频方向检测标志（允许新视频重新检测）
+      this._orientationDetected = false
       let m3u8Url = url
       if (!this._isDirectUrl(url) && !this._resolved) {
         this.loadingText = '解析播放地址…'
@@ -1112,15 +1286,40 @@ export default {
       let video = this._createH5Video()
       this._ensureH5Video()
 
+      // 成功 play 后的后处理：
+      // 1) 如果不是用户手动设的静音，自动解除静音（优先保证有声音）
+      // 2) 浏览器强制静音才 needTapPlay
+      const afterPlay = (playResult) => {
+        if (playResult && typeof playResult.catch === 'function') {
+          playResult.catch((e) => {
+            if (e && (e.name === 'NotAllowedError' || e.name === 'AbortError')) {
+              this.needTapPlay = true
+            }
+          })
+        }
+        // 如果 mutedAuto 为 true（表示只是因为 autoplay 策略而静音），
+        // 在 play 成功后尝试解除静音（配合 play() 的链式 Promise 或 setTimeout 兜底）
+        const tryUnmute = () => {
+          if (video && this.mutedAuto && video.muted) {
+            video.muted = false
+            this.isMuted = false
+            this.mutedAuto = false
+            // 某些环境需再次 play 才能出声
+            video.play().catch(() => {})
+          }
+        }
+        if (playResult && typeof playResult.then === 'function') {
+          playResult.then(() => tryUnmute()).catch(() => {})
+        } else {
+          setTimeout(tryUnmute, 0)
+        }
+      }
+
       // 非 m3u8 直接用 video.src 播放
       if (!proxiedUrl.includes('.m3u8')) {
         video.src = proxiedUrl
         this.loading = false
-        video.play().catch((e) => {
-          if (e && (e.name === 'NotAllowedError' || e.name === 'AbortError')) {
-            this.needTapPlay = true
-          }
-        })
+        afterPlay(video.play())
         return
       }
 
@@ -1137,9 +1336,7 @@ export default {
           video.src = proxiedUrl
           this.loading = false
           video.addEventListener('loadedmetadata', () => {
-            video.play().catch(() => {
-              this.needTapPlay = true
-            })
+            afterPlay(video.play())
           }, { once: true })
           return
         }
@@ -1167,11 +1364,7 @@ export default {
           hls.attachMedia(video)
           hls.on(Hls.Events.MANIFEST_PARSED, () => {
             this.loading = false
-            video.play().catch((e) => {
-              if (e && (e.name === 'NotAllowedError' || e.name === 'AbortError')) {
-                this.needTapPlay = true
-              }
-            })
+            afterPlay(video.play())
           })
           hls.on(Hls.Events.ERROR, (_, data) => {
             console.error('[player] HLS error:', data)
@@ -1252,6 +1445,45 @@ export default {
         }
         this._h5Video = null
       }
+    },
+    // 息屏亮屏后恢复播放（video 元素仍在，只是被 WebView 暂停了）
+    _resumePlayback() {
+      const v = this._h5Video
+      if (!v) {
+        // video 已被销毁（onHide 触发了 destroyHls），需要重建
+        if (this.rawUrl || (this.vodId && this.episodes.length)) {
+          this._pendingResumeTime = this.currentTime || 0
+          this._pendingAutoPlay = true
+          this._resolved = false
+          if (this.vodId && this.episodes.length) {
+            this.playEpisode(this.currentEpIdx)
+          } else if (this.rawUrl) {
+            this.startPlayUrl(this.rawUrl)
+          }
+        }
+        return
+      }
+      // video 元素还在，直接恢复播放
+      // HLS 长时间暂停后可能缓冲过期，先尝试 play，失败则重新加载
+      const tryPlay = () => {
+        v.play().catch((err) => {
+          // 自动播放被浏览器策略阻止，显示点击播放按钮
+          if (err && (err.name === 'NotAllowedError' || err.name === 'AbortError')) {
+            this.needTapPlay = true
+            this.isPlaying = false
+            return
+          }
+          // 其它错误（如缓冲过期）：尝试从当前位置重新加载
+          if (this._hls) {
+            try { this._hls.startLoad(v.currentTime || 0) } catch (e) {}
+            v.play().catch(() => {
+              this.needTapPlay = true
+              this.isPlaying = false
+            })
+          }
+        })
+      }
+      tryPlay()
     },
     selectEpisode(i) {
       if (i === this.currentEpIdx) {

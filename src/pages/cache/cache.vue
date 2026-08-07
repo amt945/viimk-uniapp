@@ -120,13 +120,26 @@ export default {
     },
     goDetail(item) {
       if (!item) return
-      // 已缓存的视频点击后跳转播放页
-      if (item.status !== 'done') {
-        uni.showToast({ title: '缓存尚未完成', icon: 'none' })
+      // H5 环境缓存只是登记记录，未真正下载，点击直接跳播放器播放在线源
+      if (item.status === 'pending' || item.status === 'downloading') {
+        uni.showToast({ title: '加入下载队列（H5 暂未实现真实下载）', icon: 'none' })
         return
       }
+      if (item.url) {
+        // action / 直接 url 模式
+        const params = [
+          'url=' + encodeURIComponent(item.url),
+          'title=' + encodeURIComponent(item.title || ''),
+          'contentType=' + encodeURIComponent(item.contentType || 'action')
+        ]
+        if (item.cover) params.push('poster=' + encodeURIComponent(item.cover))
+        uni.navigateTo({ url: '/pages/player/player?' + params.join('&') })
+        return
+      }
+      // vodId + onlineSite 模式
       const params = [
-        'vodId=' + encodeURIComponent(item.id),
+        'vodId=' + encodeURIComponent(item.vodId || item.id),
+        'site=' + encodeURIComponent(item.onlineSite || 'ffzy'),
         'title=' + encodeURIComponent(item.title || '')
       ]
       if (item.cover) params.push('poster=' + encodeURIComponent(item.cover))

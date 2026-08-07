@@ -418,29 +418,38 @@ export function fetchLibraryListPaged(cat, pg) {
 }
 
 /**
- * 动作片列表分页加载（t=6，ffzy 动作片分类）
- * 参考 fetchLibraryListPaged，固定 t=6 不走分类映射。
- * @param {number} pg  页码，从 1 开始
- * @returns {Promise<{list: Array, hasMore: boolean, page: number}|null>}
+ * 动作片列表（来自 final_crawler.py 爬取的三站点数据）
+ * 支持触底分页：pg 为页码（从 1 开始），每页 30 条。
+ * @param {number} [pg=1] 页码
+ * @returns {Promise<{list: Array, page: number, pagecount: number, total: number, hasMore: boolean}|null>}
  */
-export function fetchActionListPaged(pg) {
-  const params = { t: 6, pg: pg || 1 }
-  const cacheKey = 'action:' + (pg || 1)
-  return _listRequest(cacheKey, () => {
-    return onlineRequest('/api/list', params)
-      .then((res) => {
-        if (!res || res.code !== 0 || !res.data || !Array.isArray(res.data.list)) return null
-        return {
-          list: res.data.list,
-          hasMore: !!res.data.hasMore,
-          page: res.data.page || pg
+export function fetchActionList(pg = 1) {
+  const base = getPyApiBase() || ''
+  return onlineRequest('/api/action', { pg })
+    .then((res) => {
+      if (!res || res.code !== 0 || !res.data || !Array.isArray(res.data.list)) return null
+      // yp262 加密封面走 /api/cover_proxy 代理，返回的是相对路径，
+      // 需按当前环境补全 base：H5 预览走 /__pyapi，App 走远端 REMOTE_BASE。
+      const list = res.data.list.map((item) => {
+        const cover = item.cover || ''
+        if (cover.startsWith('/api/')) {
+          item.cover = base + cover
+          if (item.coverUrl) item.coverUrl = base + cover
         }
+        return item
       })
-      .catch((err) => {
-        console.warn('[online] action list error', err)
-        return null
-      })
-  }, pg)
+      return {
+        list,
+        page: res.data.page || pg,
+        pagecount: res.data.pagecount || 1,
+        total: res.data.total || 0,
+        hasMore: !!res.data.hasMore
+      }
+    })
+    .catch((err) => {
+      console.warn('[online] action list error', err)
+      return null
+    })
 }
 
 function mockLibraryList() {
@@ -528,7 +537,22 @@ export async function navigateToPlayer(itemOrId, fallbackTitle, contentType) {
     resolvedType = _isShortsItem(itemOrId) ? 'shorts' : ''
   }
 
-  // 快速路径：在线 item 直接同步跳转（覆盖 99% 场景）
+  // 快速路径 1：action / 直接 url 模式（收藏/历史记录里无 vodId 但有 url）
+  if (typeof itemOrId === 'object' && itemOrId.url) {
+    const params = [
+      'url=' + encodeURIComponent(itemOrId.url),
+      'title=' + encodeURIComponent(itemOrId.title || fallbackTitle || ''),
+      'contentType=' + encodeURIComponent(resolvedType || 'action')
+    ]
+    const cover = itemOrId.cover || itemOrId.pic || ''
+    if (cover) params.push('poster=' + encodeURIComponent(cover))
+    const epIdx = typeof itemOrId.episodeIndex === 'number' ? itemOrId.episodeIndex : 0
+    if (epIdx > 0) params.push('epIdx=' + epIdx)
+    uni.navigateTo({ url: '/pages/player/player?' + params.join('&') })
+    return true
+  }
+
+  // 快速路径 2：在线 item（有 vodId + onlineSite）直接同步跳转
   if (typeof itemOrId === 'object' && itemOrId.onlineSite && itemOrId.vodId) {
     const params = [
       'vodId=' + encodeURIComponent(itemOrId.vodId),
@@ -598,6 +622,65 @@ export function fetchSearchResult(q, page = 1, size = 20) {
   return delay(list)
 }
 
+/* ========================= 本地存储兼容层（App WebView 环境：优先 localStorage，兜底 uni.storage，极端情况用内存兜底） ========================= */
+/*
+ * 原因：uni-app H5 编译后通过 Android WebView file:// 加载，
+ * 某些 WebView 版本 uni.setStorageSync 可能落到第三方库的 polyfill 中，
+ * 当 polyfill 未初始化或被沙箱隔离时读写失败（空数组），但页面又不报异常。
+ * 解决：
+ *   1) 优先走 window.localStorage（所有 WebView 原生支持）
+ *   2) 失败再降级到 uni.storage
+ *   3) 双失败再用模块内存对象兜底（SPA 路由不刷新，跨页可读）
+ */
+const _memCache = Object.create(null)
+function _lsSet(key, value) {
+  _memCache[key] = value
+  try {
+    if (typeof window !== 'undefined' && window.localStorage) {
+      window.localStorage.setItem(key, JSON.stringify(value))
+    }
+  } catch (e) { /* localStorage 失败时仍会走 uni.setStorageSync 兜底 */ }
+  try { if (typeof uni !== 'undefined' && uni.setStorageSync) uni.setStorageSync(key, value) } catch (e) {}
+}
+function _lsGet(key, fallback = []) {
+  // 0) 内存优先（即时反馈）
+  if (Object.prototype.hasOwnProperty.call(_memCache, key)) return _memCache[key]
+  // 1) 优先 localStorage
+  try {
+    if (typeof window !== 'undefined' && window.localStorage) {
+      const raw = window.localStorage.getItem(key)
+      if (raw != null) {
+        const v = JSON.parse(raw)
+        _memCache[key] = v
+        // 写入 uni.storage 同步（避免下次 uni 侧读不到）
+        try { if (typeof uni !== 'undefined' && uni.setStorageSync) uni.setStorageSync(key, v) } catch (_) {}
+        return v
+      }
+    }
+  } catch (e) {}
+  // 2) 兜底 uni.storage
+  try {
+    if (typeof uni !== 'undefined' && uni.getStorageSync) {
+      const v = uni.getStorageSync(key)
+      if (v != null && v !== '') {
+        _memCache[key] = v
+        return v
+      }
+    }
+  } catch (e) {}
+  _memCache[key] = fallback
+  return fallback
+}
+function _lsRemove(key) {
+  delete _memCache[key]
+  try {
+    if (typeof window !== 'undefined' && window.localStorage) {
+      window.localStorage.removeItem(key)
+    }
+  } catch (e) {}
+  try { if (typeof uni !== 'undefined' && uni.removeStorageSync) uni.removeStorageSync(key) } catch (e) {}
+}
+
 /* ========================= 用户 ========================= */
 const STORAGE_KEYS = {
   HISTORY: 'vmk_history',
@@ -609,9 +692,9 @@ const STORAGE_KEYS = {
  * 我的-统计数据（动态读取本地存储）
  */
 export function fetchUserStats() {
-  const history = uni.getStorageSync(STORAGE_KEYS.HISTORY) || []
-  const favorite = uni.getStorageSync(STORAGE_KEYS.FAVORITE) || []
-  const offline = uni.getStorageSync(STORAGE_KEYS.OFFLINE) || []
+  const history = _lsGet(STORAGE_KEYS.HISTORY, [])
+  const favorite = _lsGet(STORAGE_KEYS.FAVORITE, [])
+  const offline = _lsGet(STORAGE_KEYS.OFFLINE, [])
   return delay([
     { label: '历史记录', value: history.length },
     { label: '我的收藏', value: favorite.length },
@@ -635,15 +718,24 @@ export function fetchUserMenu() {
  * 历史记录列表（本地存储）
  */
 export function fetchHistoryList() {
-  return delay((uni.getStorageSync(STORAGE_KEYS.HISTORY) || []).map(i => ({ ...i })))
+  return delay((_lsGet(STORAGE_KEYS.HISTORY, [])).map(i => ({ ...i })))
 }
 
 /**
  * 新增/更新播放记录
  */
 export function updateHistory(payload) {
-  const list = uni.getStorageSync(STORAGE_KEYS.HISTORY) || []
-  const idx = list.findIndex(i => i.id === payload.id)
+  if (!payload) return delay(false)
+  // 兼容 action 模式：没传 id 时用 url / vodId+onlineSite 推导
+  let id = payload.id || ''
+  if (!id) {
+    if (payload.url) id = 'action:' + payload.url
+    else if (payload.vodId) id = (payload.onlineSite || 'ffzy') + ':' + payload.vodId
+  }
+  if (!id) return delay(false)
+  payload.id = id
+  const list = _lsGet(STORAGE_KEYS.HISTORY, [])
+  const idx = list.findIndex(i => i.id === id)
   const now = new Date()
   const time = (now.getMonth() + 1) + '月' + now.getDate() + '日 ' +
     String(now.getHours()).padStart(2, '0') + ':' + String(now.getMinutes()).padStart(2, '0')
@@ -653,7 +745,7 @@ export function updateHistory(payload) {
     list.unshift({ ...payload, time })
   }
   if (list.length > 50) list.length = 50
-  uni.setStorageSync(STORAGE_KEYS.HISTORY, list)
+  _lsSet(STORAGE_KEYS.HISTORY, list)
   return delay(true)
 }
 
@@ -661,9 +753,9 @@ export function updateHistory(payload) {
  * 删除单条历史记录
  */
 export function deleteHistoryItem(id) {
-  let list = uni.getStorageSync(STORAGE_KEYS.HISTORY) || []
+  let list = _lsGet(STORAGE_KEYS.HISTORY, [])
   list = list.filter(i => i.id !== id)
-  uni.setStorageSync(STORAGE_KEYS.HISTORY, list)
+  _lsSet(STORAGE_KEYS.HISTORY, list)
   return delay(true)
 }
 
@@ -671,7 +763,7 @@ export function deleteHistoryItem(id) {
  * 清空所有历史记录
  */
 export function clearHistory() {
-  uni.setStorageSync(STORAGE_KEYS.HISTORY, [])
+  _lsSet(STORAGE_KEYS.HISTORY, [])
   return delay(true)
 }
 
@@ -679,33 +771,48 @@ export function clearHistory() {
  * 收藏列表（本地存储）
  */
 export function fetchFavoriteList() {
-  return delay((uni.getStorageSync(STORAGE_KEYS.FAVORITE) || []).map(i => ({ ...i })))
+  return delay((_lsGet(STORAGE_KEYS.FAVORITE, [])).map(i => ({ ...i })))
 }
 
 /**
- * 检查是否已收藏
+ * 检查是否已收藏（兼容 action 模式：用 url 作为主键也可判断）
  * @param {string} vodId
  * @param {string} [onlineSite] 采集站 key（默认 ffzy）
+ * @param {string} [altUrl] 动作片用 URL 做 fallback 主键
  */
-export function isFavorited(vodId, onlineSite) {
-  const list = uni.getStorageSync(STORAGE_KEYS.FAVORITE) || []
-  if (!vodId) return false
-  const site = onlineSite || 'ffzy'
-  const composite = site + ':' + vodId
-  return list.some(i => i.id === composite || (i.vodId === vodId && (i.onlineSite || 'ffzy') === site))
+export function isFavorited(vodId, onlineSite, altUrl) {
+  const list = _lsGet(STORAGE_KEYS.FAVORITE, [])
+  if (!vodId && !altUrl) return false
+  if (vodId) {
+    const site = onlineSite || 'ffzy'
+    const composite = site + ':' + vodId
+    if (list.some(i => i.id === composite || (i.vodId === vodId && (i.onlineSite || 'ffzy') === site))) return true
+  }
+  if (altUrl) {
+    if (list.some(i => i.url === altUrl || i.id === 'action:' + altUrl)) return true
+  }
+  return false
 }
 
 /**
  * 加入/取消收藏
- * payload 必传 vodId / onlineSite，确保收藏项可导航到详情页
+ * payload 必传：vodId+onlineSite 或 url（action 模式）
  */
 export function toggleFavorite(payload) {
-  let list = uni.getStorageSync(STORAGE_KEYS.FAVORITE) || []
+  let list = _lsGet(STORAGE_KEYS.FAVORITE, [])
   const vodId = payload.vodId || payload.id
   const onlineSite = payload.onlineSite || 'ffzy'
-  // 复合 id 保证唯一性（同 vodId 不同站点也可区分）
-  const composite = onlineSite + ':' + vodId
-  const idx = list.findIndex(i => i.id === composite || (i.vodId === vodId && (i.onlineSite || 'ffzy') === onlineSite))
+  let composite = ''
+  if (vodId) {
+    composite = onlineSite + ':' + vodId
+  } else if (payload.url) {
+    composite = 'action:' + payload.url
+  } else {
+    return delay({ favorited: false })
+  }
+  const idx = vodId
+    ? list.findIndex(i => i.id === composite || (i.vodId === vodId && (i.onlineSite || 'ffzy') === onlineSite))
+    : list.findIndex(i => i.id === composite)
   let favorited = false
   if (idx >= 0) {
     list.splice(idx, 1)
@@ -713,16 +820,18 @@ export function toggleFavorite(payload) {
   } else {
     list.unshift({
       id: composite,
-      vodId: vodId,
-      onlineSite: onlineSite,
+      vodId: vodId || '',
+      onlineSite: vodId ? onlineSite : '',
+      url: payload.url || '',
       title: payload.title || '',
       cover: payload.cover || '',
       meta: payload.meta || '',
-      rating: payload.rating || ''
+      rating: payload.rating || '',
+      contentType: payload.contentType || ''
     })
     favorited = true
   }
-  uni.setStorageSync(STORAGE_KEYS.FAVORITE, list)
+  _lsSet(STORAGE_KEYS.FAVORITE, list)
   return delay({ favorited })
 }
 
@@ -730,9 +839,9 @@ export function toggleFavorite(payload) {
  * 删除收藏项
  */
 export function removeFavorite(id) {
-  let list = uni.getStorageSync(STORAGE_KEYS.FAVORITE) || []
+  let list = _lsGet(STORAGE_KEYS.FAVORITE, [])
   list = list.filter(i => i.id !== id)
-  uni.setStorageSync(STORAGE_KEYS.FAVORITE, list)
+  _lsSet(STORAGE_KEYS.FAVORITE, list)
   return delay(true)
 }
 
@@ -740,29 +849,42 @@ export function removeFavorite(id) {
  * 离线缓存列表（本地存储）
  */
 export function fetchOfflineList() {
-  return delay((uni.getStorageSync(STORAGE_KEYS.OFFLINE) || []).map(i => ({ ...i })))
+  return delay((_lsGet(STORAGE_KEYS.OFFLINE, [])).map(i => ({ ...i })))
 }
 
 /**
  * 添加离线缓存
  */
 export function addOfflineItem(payload) {
-  let list = uni.getStorageSync(STORAGE_KEYS.OFFLINE) || []
-  const idx = list.findIndex(i => i.id === payload.id)
+  if (!payload) return delay(false)
+  // 兼容 action 模式：没传 id 时用 url / vodId+onlineSite 推导
+  let id = payload.id || ''
+  if (!id) {
+    if (payload.url) id = 'action:' + payload.url
+    else if (payload.vodId) id = (payload.onlineSite || 'ffzy') + ':' + payload.vodId
+  }
+  if (!id) return delay(false)
+  payload.id = id
+  let list = _lsGet(STORAGE_KEYS.OFFLINE, [])
+  const idx = list.findIndex(i => i.id === id)
   const now = new Date()
   const time = (now.getMonth() + 1) + '月' + now.getDate() + '日'
   if (idx < 0) {
     list.unshift({
-      id: payload.id,
+      id,
+      url: payload.url || '',
+      vodId: payload.vodId || '',
+      onlineSite: payload.onlineSite || '',
       title: payload.title || '',
       cover: payload.cover || '',
       meta: payload.meta || '',
-      size: payload.size || '未知',
-      progress: 0,
-      status: 'downloading',
+      size: payload.size || (typeof payload.totalSize === 'number' ? Math.round(payload.totalSize / 1024 / 1024) + 'MB' : '未知'),
+      progress: payload.progress || 0,
+      status: payload.status || 'pending',
+      contentType: payload.contentType || '',
       time
     })
-    uni.setStorageSync(STORAGE_KEYS.OFFLINE, list)
+    _lsSet(STORAGE_KEYS.OFFLINE, list)
   }
   return delay(true)
 }
@@ -771,13 +893,13 @@ export function addOfflineItem(payload) {
  * 更新离线缓存下载进度
  */
 export function updateOfflineProgress(id, progress, status) {
-  let list = uni.getStorageSync(STORAGE_KEYS.OFFLINE) || []
+  let list = _lsGet(STORAGE_KEYS.OFFLINE, [])
   const idx = list.findIndex(i => i.id === id)
   if (idx >= 0) {
     list[idx].progress = progress
     if (status) list[idx].status = status
     if (progress >= 100) list[idx].status = 'done'
-    uni.setStorageSync(STORAGE_KEYS.OFFLINE, list)
+    _lsSet(STORAGE_KEYS.OFFLINE, list)
   }
   return delay(true)
 }
@@ -786,9 +908,17 @@ export function updateOfflineProgress(id, progress, status) {
  * 删除离线缓存
  */
 export function removeOfflineItem(id) {
-  let list = uni.getStorageSync(STORAGE_KEYS.OFFLINE) || []
+  let list = _lsGet(STORAGE_KEYS.OFFLINE, [])
   list = list.filter(i => i.id !== id)
-  uni.setStorageSync(STORAGE_KEYS.OFFLINE, list)
+  _lsSet(STORAGE_KEYS.OFFLINE, list)
+  return delay(true)
+}
+
+/**
+ * 清空所有离线缓存
+ */
+export function clearOfflineAll() {
+  _lsSet(STORAGE_KEYS.OFFLINE, [])
   return delay(true)
 }
 
@@ -946,4 +1076,28 @@ export function fetchOnlineResolve(url) {
       console.warn('[online] resolve error', err)
       return null
     })
+}
+
+// 调试/预览环境：暴露核心 API 到 window，便于从控制台/evaluate 脚本里直接验证
+if (typeof window !== 'undefined') {
+  try {
+    window.__vmkApi = {
+      // 读取
+      fetchHistoryList, fetchFavoriteList, fetchOfflineList, fetchUserStats,
+      // 写入
+      updateHistory, toggleFavorite, addOfflineItem,
+      removeFavorite, removeOfflineItem, deleteHistoryItem,
+      // 辅助
+      isFavorited,
+      // 直接访问存储
+      _cacheDump() {
+        return {
+          history: _lsGet(STORAGE_KEYS.HISTORY),
+          favorite: _lsGet(STORAGE_KEYS.FAVORITE),
+          offline: _lsGet(STORAGE_KEYS.OFFLINE),
+          keys: Object.keys(_memCache)
+        }
+      }
+    }
+  } catch (_) {}
 }
