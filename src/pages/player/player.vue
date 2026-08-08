@@ -1305,7 +1305,10 @@ export default {
       const fit = this.isShorts ? 'cover' : 'contain'
       video.style.cssText = 'width:100%;height:100%;object-fit:' + fit + ';background:#000;'
       if (this.poster) video.poster = this.poster
-      video.addEventListener('click', () => {
+      video.addEventListener('click', (e) => {
+        // 阻止冒泡到 .player-page 的 @tap="onPageTap"，否则 onPageTap 会被调用两次
+        // （第一次显示控制栏，第二次冒泡又立刻隐藏）
+        e.stopPropagation()
         // 上下滑动换集后会触发 click，这里抑制掉
         if (this._swipeSuppress) {
           this._swipeSuppress = false
