@@ -393,7 +393,7 @@
     </template>
 
     <!-- 倍速选择弹窗 -->
-    <view v-if="showSpeedMenu" class="modal-mask" @tap="showSpeedMenu = false">
+    <view v-if="showSpeedMenu" class="modal-mask" @tap="closeSpeedMenu">
       <view class="modal-list" @tap.stop>
         <view
           v-for="s in speedOptions"
@@ -409,7 +409,7 @@
     </view>
 
     <!-- 更多操作弹窗 -->
-    <view v-if="showMoreMenu" class="modal-mask" @tap="showMoreMenu = false">
+    <view v-if="showMoreMenu" class="modal-mask" @tap="closeMoreMenu">
       <view class="modal-list" @tap.stop>
         <view class="modal-item" @tap="addToOffline">
           <text class="modal-item-text">加入缓存</text>
@@ -420,7 +420,7 @@
         <view class="modal-item" @tap="shareVideo">
           <text class="modal-item-text">分享</text>
         </view>
-        <view class="modal-item" @tap="toggleFavorite">
+        <view class="modal-item" @tap="toggleFavoriteFromMore">
           <text class="modal-item-text">{{ isFavorited ? '取消收藏' : '收藏' }}</text>
         </view>
       </view>
@@ -838,34 +838,58 @@ export default {
         this.statusBarHeight = (info.statusBarHeight || 20)
       } catch (e) {}
     },
+    // 显示控制层（顶栏/底栏/中央按钮），播放状态下 delay 毫秒后自动隐藏
+    _showControls(delay = 3000) {
+      this.showTopBar = true
+      this.showCenterControl = true
+      clearTimeout(this._ctrlTimer)
+      if (delay > 0) {
+        this._ctrlTimer = setTimeout(() => {
+          if (this.isPlaying && !this.showPanel && !this.showSpeedMenu && !this.showMoreMenu) {
+            this.showTopBar = false
+            this.showCenterControl = false
+          }
+        }, delay)
+      }
+    },
+    // 手动隐藏控制层
+    _hideControls() {
+      clearTimeout(this._ctrlTimer)
+      this.showTopBar = false
+      this.showCenterControl = false
+    },
     onPageTap() {
       // 滑动换集后会触发 tap，这里抑制掉
       if (this._swipeSuppress) {
         this._swipeSuppress = false
         return
       }
-      this.showTopBar = !this.showTopBar
-      // 显示控制栏时同时显示中央按钮，3 秒后自动隐藏中央按钮
+      // 控制层已显示 → 隐藏；否则显示并开始自动隐藏计时
       if (this.showTopBar) {
-        this.showCenterControl = true
-        clearTimeout(this._centerTimer)
-        this._centerTimer = setTimeout(() => {
-          this.showCenterControl = false
-        }, 3000)
+        this._hideControls()
+      } else {
+        this._showControls(this.isPlaying ? 3000 : 0)
       }
     },
     togglePanel() {
       this.showPanel = !this.showPanel
-      if (this.showPanel) this.showTopBar = false
-      else this.showTopBar = true
+      if (this.showPanel) {
+        this._hideControls()
+      } else {
+        this._showControls(this.isPlaying ? 3000 : 0)
+      }
     },
     openSpeedMenu() {
       this.showSpeedMenu = true
       this.showMoreMenu = false
+      // 保证关闭更多/倍速面板时控制栏还显示
+      this._showControls(this.isPlaying ? 3000 : 0)
     },
     openMoreMenu() {
       this.showMoreMenu = true
       this.showSpeedMenu = false
+      // 保证关闭更多菜单后控制栏还显示
+      this._showControls(this.isPlaying ? 3000 : 0)
     },
     selectSpeed(s) {
       this.currentSpeed = s
@@ -873,6 +897,7 @@ export default {
       if (this._h5Video) {
         this._h5Video.playbackRate = s
       }
+      this._showControls(this.isPlaying ? 3000 : 0)
     },
     togglePlay() {
       const v = this._h5Video
@@ -914,16 +939,24 @@ export default {
       this.currentTime = target
       this._flashControls()
     },
-    // 短暂显示控制栏（快进/快退反馈）
+    // 短暂显示控制栏（快进/快退反馈）—— 统一走 _showControls
     _flashControls() {
-      this.showTopBar = true
-      this.showCenterControl = true
-      if (this._ctrlTimer) clearTimeout(this._ctrlTimer)
-      this._ctrlTimer = setTimeout(() => {
-        if (this.isPlaying) {
-          this.showCenterControl = false
-        }
-      }, 2000)
+      this._showControls(this.isPlaying ? 3000 : 0)
+    },
+    // 关闭倍速菜单并恢复控制栏显示
+    closeSpeedMenu() {
+      this.showSpeedMenu = false
+      this._showControls(this.isPlaying ? 3000 : 0)
+    },
+    // 关闭更多菜单并恢复控制栏显示
+    closeMoreMenu() {
+      this.showMoreMenu = false
+      this._showControls(this.isPlaying ? 3000 : 0)
+    },
+    // 从更多弹窗里点击收藏：先关闭弹窗再执行收藏（避免重复 toast 干扰）
+    async toggleFavoriteFromMore() {
+      this.closeMoreMenu()
+      await this.toggleFavorite()
     },
     // ================ 电影/电视剧模式：视频区上下滑动换集 ================
     // 仅在 1/3 视频区域内生效，不影响下方内容区滚动
@@ -1106,7 +1139,7 @@ export default {
       // 电影/电视剧 进入全屏 → 横屏；退出 → 竖屏
       // 短剧默认竖屏，全屏只做 CSS 铺满不切横屏
       this.isFullscreen = !this.isFullscreen
-      this.showTopBar = true
+      this._showControls(this.isPlaying ? 3000 : 0)
       if (!this.isShorts) {
         if (this.isFullscreen) {
           // 尝试原生横屏；失败（如 iOS Safari）则用 CSS rotate 模拟
@@ -1167,6 +1200,7 @@ export default {
       this.isMuted = v.muted
       this.mutedAuto = v.muted
       if (!v.muted) v.play().catch(() => {})
+      this._showControls(this.isPlaying ? 3000 : 0)
     },
     async toggleFavorite() {
       const hasVodId = !!this.vodId
@@ -1230,7 +1264,7 @@ export default {
           : (this.contentType || '动作片'),
         size: this.duration ? Math.round(this.duration * 0.2 / 1024 / 1024) + 'MB' : '未知'
       })
-      this.showMoreMenu = false
+      this.closeMoreMenu()
       if (ok) {
         uni.showToast({ title: '已加入下载队列', icon: 'none' })
       }
@@ -1242,11 +1276,11 @@ export default {
           uni.showToast({ title: '链接已复制', icon: 'none' })
         })
       }
-      this.showMoreMenu = false
+      this.closeMoreMenu()
     },
     shareVideo() {
       uni.showToast({ title: '分享功能开发中', icon: 'none' })
-      this.showMoreMenu = false
+      this.closeMoreMenu()
     },
     goSeries(s) {
       if (!s) return
@@ -1282,18 +1316,26 @@ export default {
           this.isMuted = false
           this.mutedAuto = false
           video.play().catch(() => {})
+          // 解除静音后显示控制栏并启动自动隐藏计时
+          this._showControls(this.isPlaying ? 3000 : 0)
         } else {
-          this.showTopBar = !this.showTopBar
-          this.isPlaying = !video.paused
+          // 统一走 onPageTap 的逻辑：显示 ↔ 隐藏 控制层
+          this.onPageTap()
         }
       })
       video.addEventListener('play', () => {
         this.isPlaying = true
+        // 开始播放 → 显示控制栏并在 3 秒后自动隐藏（如果没打开任何面板）
+        this._showControls(3000)
         // 开始播放后写入历史记录（防抖，避免频繁 seek 触发多次）
         clearTimeout(this._historyDebounce)
         this._historyDebounce = setTimeout(() => this._savePlayHistory(), 1500)
       })
-      video.addEventListener('pause', () => { this.isPlaying = false })
+      video.addEventListener('pause', () => {
+        this.isPlaying = false
+        // 暂停时显示控制栏，不自动隐藏（delay=0 表示不启动计时隐藏）
+        this._showControls(0)
+      })
       video.addEventListener('ratechange', () => {
         this.currentSpeed = video.playbackRate || 1.0
         // 用户改了倍速，也顺手写入持久化（下次播放用同一倍速）
