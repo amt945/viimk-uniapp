@@ -1,0 +1,32 @@
+# Render 部署配置 - VIIMK 后端（最小仓库专用）
+# ============================================================================
+# 本文件用于 backend/ 目录被单独作为仓库（viimk-api）推送时。
+#   1. cd backend  （或 cp -r backend viimk-api && cd viimk-api）
+#   2. git init && git add . && git push 到 GitHub viimk-api 仓库
+#   3. Render 控制台 → New → Blueprint → 连接该仓库
+#   4. Render 自动读取本文件，一键创建服务
+#
+# 如果是整仓推送（含前端），用项目根目录 ../render.yaml（含 rootDir=backend）
+#
+# 或手动创建：
+#   Render → New → Web Service → 选仓库 → 配置见下方
+# ============================================================================
+services:
+  - type: web
+    name: viimk-api
+    runtime: python
+    region: singapore   # 新加坡节点，离国内最近（也可选 oregon / frankfurt）
+    plan: free          # 免费版：750 小时/月，15 分钟无访问会睡眠
+    buildCommand: |
+      pip install --upgrade pip wheel
+      pip install -r requirements.txt
+      pip install gunicorn
+    startCommand: gunicorn --bind 0.0.0.0:$PORT --workers 2 --timeout 60 --access-logfile - --error-logfile - server:app
+    healthCheckPath: /api/health
+    autoDeploy: true
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: FLASK_ENV
+        value: production
+      # 如需采集站切换/Referer 自定义，可在此添加环境变量

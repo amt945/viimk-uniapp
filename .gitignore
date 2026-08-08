@@ -1,0 +1,15 @@
+node_modules
+unpackage
+dist
+.DS_Store
+*.log
+.idea
+.vscode
+.hbuilderx
+.venv/
+.python-version
+__pycache__/
+*.pyc
+.python.log
+downloads/
+/tmp/

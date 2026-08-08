@@ -1,0 +1,48 @@
+/**
+ * VIIMK 设计令牌 (Design Tokens)
+ * 全局 SCSS 变量，可在任意 .vue 文件中通过 var() 或直接引用
+ */
+
+/* === 颜色 === */
+$vmk-primary: #2B7FFF;
+$vmk-primary-dark: #1A6DE5;
+$vmk-background: #0D0D12;
+$vmk-card: #18181F;
+$vmk-foreground: #FFFFFF;
+$vmk-muted: #9CA3AF;
+$vmk-border: #2A2A35;
+$vmk-muted-bg: #23232B;
+$vmk-success: #22C55E;
+$vmk-warning: #F59E0B;
+$vmk-error: #EF4444;
+
+/* === 圆角 === */
+$vmk-radius-sm: 4px;
+$vmk-radius-md: 8px;
+$vmk-radius-lg: 12px;
+$vmk-radius-xl: 16px;
+$vmk-radius-full: 9999px;
+
+/* === 字号 === */
+$vmk-text-xs: 11px;
+$vmk-text-sm: 12px;
+$vmk-text-base: 14px;
+$vmk-text-lg: 16px;
+$vmk-text-xl: 18px;
+$vmk-text-2xl: 22px;
+
+/* === 布局 === */
+$vmk-page-padding: 16px;
+$vmk-gap: 12px;
+$vmk-status-bar: 44px;
+$vmk-bottom-nav: 56px;
+
+/* uni-app 内置变量 */
+$uni-color-primary: $vmk-primary;
+$uni-color-success: $vmk-success;
+$uni-color-warning: $vmk-warning;
+$uni-color-error: $vmk-error;
+$uni-text-color: $vmk-foreground;
+$uni-text-color-grey: $vmk-muted;
+$uni-bg-color: $vmk-background;
+$uni-border-color: $vmk-border;

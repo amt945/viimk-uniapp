@@ -1,0 +1,95 @@
+# 腾讯云 SCF 云函数部署配置
+# ============================================================================
+# 部署方式（两种任选）：
+#
+# 方式 A：网页控制台（推荐给新手，不用装 CLI）
+#   1. 打开 https://console.cloud.tencent.com/scf
+#   2. 左侧「函数服务」→ 新建 → 自定义创建
+#   3. 函数名称：viimk-api
+#   4. 运行环境：Python 3.10（或 3.9）
+#   5. 函数代码：本地上传 zip 包 → 打包当前目录 zip（scf_handler.py + server.py + requirements.txt）
+#   6. 执行方法：scf_handler.main_handler
+#   7. 内存：512MB（推荐，256MB 可跑但采集请求可能卡）
+#   8. 初始化超时：60 秒
+#   9. 执行超时：60 秒（采集站偶发慢请求，别设太短，默认 3s 必炸）
+#   10. 完成创建 → 函数配置 → 层管理 → 新建层（用于装 requirements.txt 的依赖）
+#       或直接在「函数代码 → 终端 → pip install -r requirements.txt -t .」
+#   11. 触发器 → API Gateway 触发器 → HTTP API → 开启 CORS → 保存
+#       得到 https://service-xxx.gz.apigw.tencentcs.com/release/ 访问地址
+#
+# 方式 B：Serverless Framework CLI（高级，一键部署）
+#   1. npm i -g serverless
+#   2. serverless deploy  ← 自动按本配置部署 + 依赖安装 + 创建 APIGW
+# ============================================================================
+
+# ====== Serverless Framework 配置 ======
+# serverless 部署时读取，网页控制台部署时忽略
+component: scf
+name: viimk-api
+app: viimk
+stage: prod
+
+inputs:
+  name: viimk-api
+  region: ap-guangzhou      # 国内选广州/上海/北京，离你用户近的
+  runtime: Python3.10
+  # 执行方法：文件名.函数名
+  handler: scf_handler.main_handler
+  # 内存 + 超时（云函数免费额度按 GB-s 计，别调太大，够用就好）
+  memorySize: 512           # 推荐 512（搜索/详情/流代理需要足够内存缓存）
+  timeout: 60               # 采集站偶尔慢，60s 足够；最高 900s
+  initTimeout: 60           # 冷启动第一次加载 Flask/requests 可能慢
+  environment:
+    variables:
+      FLASK_ENV: production
+      TZ: Asia/Shanghai
+  # 函数代码：包含 SCF 入口 + Flask 后端（当前根目录）
+  src:
+    src: ./
+    exclude:
+      - .git
+      - node_modules
+      - .venv
+      - __pycache__
+      - "*.pyc"
+      - "*.log"
+      - deploy/
+      - start.sh
+      - start.bat
+      - vite.config.js
+      - package.json
+      - package-lock.json
+      - src/
+      - uni.scss
+      - manifest.json
+      - pages.json
+      - unpackage/
+  # API Gateway 触发器 —— 自动给 HTTP 访问地址
+  triggers:
+    - type: apigw
+      parameters:
+        name: viimk-api-gw
+        serviceName: viimk-api-service
+        release: release
+        protocols:
+          - http
+          - https
+        environment: release
+        netTypes:
+          - OUTER
+        description: VIIMK API HTTP 触发器
+        apis:
+          - path: /{proxy+}
+            method: ANY
+            apiName: viimk-api-any
+            description: 代理所有 HTTP method/path
+            # SCF <-> APIGW：开启响应集成，才能返回自定义 statusCode/headers
+            type: NORMAL
+            isBase64Encoded: true  # 二进制内容正确传输
+            isIntegratedResponse: true
+            serviceConfig:
+              timeout: 60000
+  # 层（layer）：把 pip 安装的依赖做独立层，多个函数可复用；可选
+  # layers:
+  #   - name: viimk-deps
+  #     version: 1
