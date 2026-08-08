@@ -40,6 +40,8 @@
 
     <!-- ========== 短剧布局（竖屏/短视频风格） ========== -->
     <template v-if="isShorts">
+      <!-- 全屏透明点击捕获层：只在没有按钮覆盖的空白区域触发 onPageTap（切换控制栏显隐） -->
+      <view class="ctrl-capture-layer" @tap="onPageTap"></view>
       <!-- 上下滑动换集提示（轻量常驻） -->
       <view v-if="!showPanel && !showSpeedMenu && !showMoreMenu" class="swipe-hint" @tap.stop>
         <view class="swipe-hint-arrows">
@@ -212,9 +214,10 @@
 
     <!-- ========== 电影/电视剧布局（1/3 视频 + 控制栏叠加 + 底部选集栏 + 弹出面板） ========== -->
     <template v-else>
+      <!-- 全屏透明点击捕获层：没有按钮覆盖的空白区域点击 → 切换控制栏显隐 -->
+      <view class="ctrl-capture-layer" @tap="onPageTap"></view>
       <!-- 视频区控制层（叠加在 1/3 视频上） -->
       <view class="movie-video-controls"
-        @tap.stop="onPageTap"
         @touchstart="onMovieVideoTouchStart"
         @touchmove.stop.prevent="onMovieVideoTouchMove"
         @touchend="onMovieVideoTouchEnd"
@@ -1898,15 +1901,31 @@ export default {
       this.needTapPlay = false
       const video = this._h5Video
       if (!video) return
-      video.muted = false
-      this.isMuted = false
-      this.mutedAuto = false
-      video.play().catch(() => {
-        video.muted = true
-        this.isMuted = true
-        this.mutedAuto = true
-        video.play().catch(() => {})
-      })
+      // 息屏/NotAllowedError 后需要用户点击才能继续播放：
+      // 优先用本地存储里记录的息屏前进度恢复（兜底），否则直接 play
+      const saved = loadPlaybackPos(this._persistKeyForPos())
+      const desiredPos = (video.currentTime || 0) > 5 ? video.currentTime
+                        : (saved && saved.pos > 5 ? saved.pos : 0)
+      const resume = () => {
+        video.muted = false
+        this.isMuted = false
+        this.mutedAuto = false
+        const p = video.play()
+        if (!p || typeof p.then !== 'function') return
+        p.catch(() => {
+          video.muted = true
+          this.isMuted = true
+          this.mutedAuto = true
+          video.play().catch(() => {})
+        })
+      }
+      if (desiredPos > 5 && Math.abs((video.currentTime || 0) - desiredPos) > 2.0) {
+        try { video.currentTime = desiredPos } catch (_) {}
+        // canplay 可能被缓存，等待一小段确保 seek 生效再 play
+        setTimeout(resume, 50)
+      } else {
+        resume()
+      }
     },
     retry() {
       this.errMsg = ''
@@ -1934,6 +1953,16 @@ export default {
   background-color: #000;
   overflow: hidden;
 }
+/* 全屏透明点击捕获层：最底层，只在没有按钮覆盖的空白区域触发 onPageTap
+   其他所有按钮/控制栏/进度条 z-index 必须 > 1 才能拦截点击而不触发 onPageTap */
+.ctrl-capture-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  background-color: transparent;
+}
+/* 保证 .swipe-hint / .shorts-center-overlay 的 pointer-events:none 不会阻断捕获层
+   （它们本身已有 z-index 12/15，且 pointer-events:none 或子元素单独 enable） */
 .video-bg {
   position: absolute;
   inset: 0;
