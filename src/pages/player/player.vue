@@ -41,7 +41,7 @@
     <!-- ========== 短剧布局（竖屏/短视频风格） ========== -->
     <template v-if="isShorts">
       <!-- 全屏透明点击捕获层：只在没有按钮覆盖的空白区域触发 onPageTap（切换控制栏显隐） -->
-      <view class="ctrl-capture-layer" @tap="onPageTap"></view>
+      <view class="ctrl-capture-layer" @tap.stop="onPageTap"></view>
       <!-- 上下滑动换集提示（轻量常驻） -->
       <view v-if="!showPanel && !showSpeedMenu && !showMoreMenu" class="swipe-hint" @tap.stop>
         <view class="swipe-hint-arrows">
@@ -215,9 +215,10 @@
     <!-- ========== 电影/电视剧布局（1/3 视频 + 控制栏叠加 + 底部选集栏 + 弹出面板） ========== -->
     <template v-else>
       <!-- 全屏透明点击捕获层：没有按钮覆盖的空白区域点击 → 切换控制栏显隐 -->
-      <view class="ctrl-capture-layer" @tap="onPageTap"></view>
+      <view class="ctrl-capture-layer" @tap.stop="onPageTap"></view>
       <!-- 视频区控制层（叠加在 1/3 视频上） -->
       <view class="movie-video-controls"
+        @tap="onPageTap"
         @touchstart="onMovieVideoTouchStart"
         @touchmove.stop.prevent="onMovieVideoTouchMove"
         @touchend="onMovieVideoTouchEnd"
@@ -696,7 +697,9 @@ export default {
   },
   async onLoad(options) {
     const q = options || {}
-    this.contentType = q.contentType || ''
+    // 兼容 type=shorts / type=movie 旧参数和 contentType= 新参数
+    const t = q.contentType || q.type || ''
+    this.contentType = (t === 'movie' || t === 'shorts') ? t : ''
     this.vodId = q.vodId || q.vod_id || q.id || ''
     this.siteKey = q.site || q.online_site || ''
     const initEp = parseInt(q.epIdx || q.ep || '0', 10)
@@ -1953,12 +1956,12 @@ export default {
   background-color: #000;
   overflow: hidden;
 }
-/* 全屏透明点击捕获层：最底层，只在没有按钮覆盖的空白区域触发 onPageTap
-   其他所有按钮/控制栏/进度条 z-index 必须 > 1 才能拦截点击而不触发 onPageTap */
+/* 全屏透明点击捕获层：必须覆盖所有"只显示内容不带 @tap.stop 的容器"（movie-info-area, .movie-video-controls 的空白底等）
+   但低于显式的交互按钮层（顶栏/底栏/中央按钮/弹窗都统一提升到 z-index: 50 以上） */
 .ctrl-capture-layer {
   position: absolute;
   inset: 0;
-  z-index: 1;
+  z-index: 40;
   background-color: transparent;
 }
 /* 保证 .swipe-hint / .shorts-center-overlay 的 pointer-events:none 不会阻断捕获层
@@ -2089,7 +2092,7 @@ export default {
   left: 0;
   right: 0;
   height: 33.3333vh;
-  z-index: 15;
+  z-index: 45;
   overflow: hidden;
 }
 
@@ -2105,7 +2108,7 @@ export default {
   justify-content: space-between;
   padding: 0 24rpx;
   background: linear-gradient(180deg, rgba(0,0,0,0.75) 0%, transparent 100%);
-  z-index: 20;
+  z-index: 55;
 }
 
 /* 中央叠加层：暂停时大按钮，播放时集数信息 */
@@ -2115,7 +2118,7 @@ export default {
   display: flex;
   align-items: center;
   justify-content: center;
-  z-index: 12;
+  z-index: 55;
   pointer-events: none;
 }
 .movie-center-play-btn {
@@ -2141,7 +2144,7 @@ export default {
   padding: 14rpx 8rpx;
   border-radius: 9999rpx;
   background-color: rgba(0, 0, 0, 0.35);
-  z-index: 13;
+  z-index: 50;
   pointer-events: none;
 }
 .movie-swipe-arrow {
@@ -2181,7 +2184,7 @@ export default {
   padding: 0 16rpx;
   gap: 10rpx;
   background: linear-gradient(0deg, rgba(0,0,0,0.75) 0%, transparent 100%);
-  z-index: 20;
+  z-index: 55;
 }
 .movie-bottom-btn {
   width: 64rpx;
@@ -2405,6 +2408,7 @@ export default {
   flex-direction: column;
   background-color: #0D0D12;
   overflow: hidden;
+  z-index: 45;
 }
 .movie-info-header {
   display: flex;
@@ -2568,7 +2572,7 @@ export default {
   justify-content: space-between;
   padding: 0 24rpx;
   background: linear-gradient(180deg, rgba(0,0,0,0.7) 0%, transparent 100%);
-  z-index: 20;
+  z-index: 55;
 }
 .shorts-top-btn {
   width: 72rpx;
@@ -2604,7 +2608,7 @@ export default {
   left: 28rpx;
   top: 50%;
   transform: translateY(-50%);
-  z-index: 15;
+  z-index: 50;
   pointer-events: none;
 }
 .swipe-hint-arrows {
@@ -2652,7 +2656,7 @@ export default {
   display: flex;
   align-items: center;
   justify-content: center;
-  z-index: 12;
+  z-index: 55;
   pointer-events: none;
 }
 .shorts-center-play-btn {
@@ -2678,7 +2682,7 @@ export default {
   padding: 0 16rpx;
   gap: 10rpx;
   background: linear-gradient(0deg, rgba(0,0,0,0.6) 0%, transparent 100%);
-  z-index: 20;
+  z-index: 55;
 }
 .shorts-ctrl-btn {
   width: 64rpx;
@@ -2722,7 +2726,7 @@ export default {
   padding: 32rpx 24rpx;
   padding-bottom: calc(32rpx + env(safe-area-inset-bottom));
   background: linear-gradient(0deg, rgba(0,0,0,0.85) 0%, rgba(0,0,0,0.4) 70%, transparent 100%);
-  z-index: 20;
+  z-index: 55;
 }
 .shorts-ep-scroll {
   display: flex;
