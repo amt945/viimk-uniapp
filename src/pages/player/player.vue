@@ -214,7 +214,7 @@
     <template v-else>
       <!-- 视频区控制层（叠加在 1/3 视频上） -->
       <view class="movie-video-controls"
-        @tap.stop
+        @tap.stop="onPageTap"
         @touchstart.stop="onMovieVideoTouchStart"
         @touchmove.stop="onMovieVideoTouchMove"
         @touchend.stop="onMovieVideoTouchEnd"
@@ -1178,19 +1178,9 @@ export default {
         return true
       } catch (_) {}
       // #endif
-      // 3) 浏览器端尝试 screen.orientation.lock（需在用户手势里，且移动端多数浏览器不支持，忽略）
-      try {
-        const scr = window.screen
-        if (scr && scr.orientation && typeof scr.orientation.lock === 'function') {
-          const map = {
-            portrait: 'portrait-primary',
-            landscape: 'landscape-primary',
-            unspecified: 'any'
-          }
-          scr.orientation.lock(map[o] || 'any').catch(() => {})
-          return true
-        }
-      } catch (_) {}
+      // 3) 浏览器端：iOS Safari 等不支持 screen.orientation.lock
+      //    screen.orientation.lock() 返回 Promise，无法同步判断是否成功
+      //    统一返回 false → 由 CSS rotate(90deg) 模拟横屏，保证所有浏览器一致
       return false
     },
     toggleMute() {
