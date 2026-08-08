@@ -89,11 +89,14 @@
 import StatusBar from '@/components/StatusBar.vue'
 import BottomNav from '@/components/BottomNav.vue'
 import VmkIcon from '@/components/VmkIcon.vue'
-import { fetchShortsTabs, fetchShortsListPaged, navigateToPlayer } from '@/api/index.js'
+import { fetchShortsTabs, fetchShortsListPaged, navigateToPlayer, usePageSuspendTracker } from '@/api/index.js'
 
 export default {
   name: 'Shorts',
   components: { StatusBar, BottomNav, VmkIcon },
+  created() {
+    this._suspendTracker = usePageSuspendTracker(this, 'ShortsPage')
+  },
   data() {
     return {
       cats: [],
@@ -107,7 +110,12 @@ export default {
       _autoLoadCount: 0       // 自动补载安全锁
     }
   },
+  onHide() {
+    if (this._suspendTracker) this._suspendTracker.onHide()
+  },
   async onShow() {
+    // 息屏/切后台回来 → 不重新加载，保留当前列表和滚动位置
+    if (this.initialized && this._suspendTracker && this._suspendTracker.shouldSkip()) return
     // cats 是本地数据（delay 200ms），和列表并行加载
     const catsPromise = this.cats.length === 0
       ? fetchShortsTabs().then(c => { this.cats = c })

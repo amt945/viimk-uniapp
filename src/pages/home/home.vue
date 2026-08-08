@@ -142,12 +142,17 @@ import {
   fetchHeroBanner,
   fetchHomeCategories,
   fetchHomeList,
-  navigateToPlayer
+  navigateToPlayer,
+  usePageSuspendTracker
 } from '@/api/index.js'
 
 export default {
   name: 'Home',
   components: { StatusBar, BottomNav, VmkIcon },
+  created() {
+    // 注册息屏/切后台跟踪器：真实导航返回时仍刷新，息屏/切后台回来跳过加载
+    this._suspendTracker = usePageSuspendTracker(this, 'HomePage')
+  },
   data() {
     return {
       heroBanner: {},
@@ -163,7 +168,14 @@ export default {
       _autoLoadCount: 0        // _ensureScrollable 自动补载的页数（安全锁，防死循环）
     }
   },
+  onHide() {
+    // 标记为"真实页面切换"（navigateTo / switchTab 等），
+    // 下次 onShow 时不跳过（保证从详情页返回的数据是最新的）
+    if (this._suspendTracker) this._suspendTracker.onHide()
+  },
   async onShow() {
+    // 息屏/切后台回来 → 不重新加载，保留当前列表和滚动位置
+    if (this.hotInitialized && this._suspendTracker && this._suspendTracker.shouldSkip()) return
     // 首次加载：尝试从持久化缓存恢复（秒出，无骨架屏），再后台静默刷新
     if (!this.hotInitialized) {
       if (this._restoreFromStorage()) {

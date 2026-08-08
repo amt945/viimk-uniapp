@@ -52,18 +52,26 @@
 import StatusBar from '@/components/StatusBar.vue'
 import BottomNav from '@/components/BottomNav.vue'
 import VmkIcon from '@/components/VmkIcon.vue'
-import { fetchUserStats, fetchUserMenu } from '@/api/index.js'
+import { fetchUserStats, fetchUserMenu, usePageSuspendTracker } from '@/api/index.js'
 
 export default {
   name: 'Profile',
   components: { StatusBar, BottomNav, VmkIcon },
+  created() {
+    this._suspendTracker = usePageSuspendTracker(this, 'ProfilePage')
+  },
   data() {
     return {
       profileStats: [],
       profileMenu: []
     }
   },
+  onHide() {
+    if (this._suspendTracker) this._suspendTracker.onHide()
+  },
   async onShow() {
+    // 息屏/切后台回来 → 不重新刷（stats/menu 都是本地数据，真实导航返回时会刷新）
+    if (this._suspendTracker && this._suspendTracker.shouldSkip()) return
     const [stats, menu] = await Promise.all([
       fetchUserStats(),
       fetchUserMenu()
@@ -141,6 +149,7 @@ export default {
 /* Stats */
 .stats-card {
   padding: 32rpx;
+  margin-bottom: 10px;
 }
 
 .stats-row {

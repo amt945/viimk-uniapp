@@ -87,11 +87,14 @@
 import StatusBar from '@/components/StatusBar.vue'
 import BottomNav from '@/components/BottomNav.vue'
 import VmkIcon from '@/components/VmkIcon.vue'
-import { fetchLibraryCategories, fetchLibraryListPaged, navigateToPlayer } from '@/api/index.js'
+import { fetchLibraryCategories, fetchLibraryListPaged, navigateToPlayer, usePageSuspendTracker } from '@/api/index.js'
 
 export default {
   name: 'Library',
   components: { StatusBar, BottomNav, VmkIcon },
+  created() {
+    this._suspendTracker = usePageSuspendTracker(this, 'LibraryPage')
+  },
   data() {
     return {
       cats: [],
@@ -105,7 +108,12 @@ export default {
       _autoLoadCount: 0       // 自动补载安全锁
     }
   },
+  onHide() {
+    if (this._suspendTracker) this._suspendTracker.onHide()
+  },
   async onShow() {
+    // 息屏/切后台回来 → 不重新加载，保留当前列表和滚动位置
+    if (this.initialized && this._suspendTracker && this._suspendTracker.shouldSkip()) return
     // cats 和列表并行加载，列表就绪即隐藏骨架屏
     const catsPromise = this.cats.length === 0
       ? fetchLibraryCategories().then(c => { this.cats = c })

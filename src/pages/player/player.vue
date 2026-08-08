@@ -430,7 +430,10 @@
 
 <script>
 import VmkIcon from '@/components/VmkIcon.vue'
-import { fetchOnlineDetail, fetchOnlineResolve, toggleFavorite, isFavorited, updateHistory, addOfflineItem } from '@/api/index.js'
+import {
+  fetchOnlineDetail, fetchOnlineResolve, toggleFavorite, isFavorited, updateHistory, addOfflineItem,
+  usePageSuspendTracker, savePlaybackPos, loadPlaybackPos, clearPlaybackPos
+} from '@/api/index.js'
 
 const IS_H5 = true  // App 端也是 WebView，统一使用 H5 播放方案
 
@@ -483,8 +486,13 @@ export default {
       currentTime: 0,
       duration: 0,
       buffered: 0,
-      _seeking: false
+      _seeking: false,
+      _posPersistTs: 0
     }
+  },
+  created() {
+    // 接入页面级息屏/切后台跟踪器：息屏返回时跳过 onShow 重建播放器
+    this._suspendTracker = usePageSuspendTracker(this, 'PlayerPage', { refreshOnBack: true })
   },
   computed: {
     isShorts() {
@@ -550,30 +558,88 @@ export default {
     }
     // 监听页面可见性变化（手机息屏/切后台 → 亮屏恢复）
     // Android WebView 息屏时会自动暂停 video，亮屏后需手动恢复播放
+    // 注意：Android WebView 息屏/亮屏多数情况下不触发 visibilitychange，
+    //      需配合 RAF 心跳 + pageshow + focus 多重兜底
+    this._markActive = () => {
+      if (this._suspended) {
+        this._suspended = false
+        // 恢复播放（若之前在播放）
+        if (this._wasPlayingBeforeHidden) {
+          this._wasPlayingBeforeHidden = false
+          // 延迟 300ms 确保 WebView 完全恢复后再 play
+          setTimeout(() => { this._resumePlayback() }, 300)
+        }
+      }
+    }
+    this._markSuspended = () => {
+      // 息屏/切后台前立刻写盘当前播放进度（最关键！WebView 可能下一秒就被系统切走）
+      try { this._persistPosition(true) } catch (_) {}
+      // 记录播放状态，暂停视频（不销毁，保留进度）
+      if (!this._suspended) {
+        this._suspended = true
+        this._wasPlayingBeforeHidden = this.isPlaying
+        const v = this._h5Video
+        if (v && !v.paused) {
+          try { v.pause() } catch (e) {}
+        }
+      }
+    }
     if (typeof document !== 'undefined') {
       this._onVisibilityChange = () => {
-        if (document.hidden) {
-          // 息屏/切后台：记录播放状态，暂停视频（不销毁，保留进度）
-          this._wasPlayingBeforeHidden = this.isPlaying
-          const v = this._h5Video
-          if (v && !v.paused) {
-            try { v.pause() } catch (e) {}
-          }
-        } else {
-          // 亮屏/恢复：如果之前在播放，恢复播放
-          if (this._wasPlayingBeforeHidden) {
-            this._wasPlayingBeforeHidden = false
-            // 延迟 300ms 确保 WebView 完全恢复后再 play
-            setTimeout(() => {
-              this._resumePlayback()
-            }, 300)
-          }
-        }
+        if (document.hidden) this._markSuspended()
+        else this._markActive()
       }
       document.addEventListener('visibilitychange', this._onVisibilityChange)
     }
+    // 兜底1：pageshow/pagehide（Android WebView 切后台/息屏有时会触发）
+    if (typeof window !== 'undefined') {
+      this._onPageShow = (e) => {
+        // e.persisted 表示从 bfcache 恢复
+        if (e.persisted || !document.hidden) this._markActive()
+      }
+      this._onPageHide = () => this._markSuspended()
+      window.addEventListener('pageshow', this._onPageShow)
+      window.addEventListener('pagehide', this._onPageHide)
+    }
+    // 兜底2：focus/blur（部分 Android WebView 息屏会触发 window blur）
+    if (typeof window !== 'undefined') {
+      this._onWinFocus = () => this._markActive()
+      this._onWinBlur = () => {
+        // blur 不一定意味着息屏（可能是切换输入法等），延迟 800ms 再判定
+        if (this._blurTimer) clearTimeout(this._blurTimer)
+        this._blurTimer = setTimeout(() => {
+          if (document.hidden || !document.hasFocus()) this._markSuspended()
+        }, 800)
+      }
+      window.addEventListener('focus', this._onWinFocus)
+      window.addEventListener('blur', this._onWinBlur)
+    }
+    // 兜底3：RAF 心跳 —— Android WebView 息屏后 requestAnimationFrame 会暂停，
+    //        亮屏后第一个 RAF tick 即可触发恢复（最可靠的息屏检测）
+    this._rafLastTs = 0
+    this._rafSuspendedFlag = false
+    this._rafTick = (ts) => {
+      if (this._rafLastTs === 0) {
+        this._rafLastTs = ts
+      } else {
+        // 间隔超过 2 秒未触发 RAF，认为发生过息屏/挂起
+        const gap = ts - this._rafLastTs
+        if (gap > 2000) {
+          this._markActive()
+        }
+      }
+      this._rafLastTs = ts
+      this._rafId = requestAnimationFrame(this._rafTick)
+    }
+    if (typeof window !== 'undefined' && window.requestAnimationFrame) {
+      this._rafId = requestAnimationFrame(this._rafTick)
+    }
   },
   beforeUnmount() {
+    // 0) 先清 onHide 的延迟销毁 timer（如果还在），避免页面都销毁了还触发 destroy
+    if (this._hideDestroyTimer) { clearTimeout(this._hideDestroyTimer); this._hideDestroyTimer = null }
+    // 0.5) 兜底再停声一次：beforeUnmount = Vue 组件卸载（离开播放页 100% 会触发）
+    try { this._hardStopPlayback('beforeUnmount') } catch (_) {}
     // 离开播放页前恢复竖屏，避免别的页面也是横屏
     this._nativeSetOrientation('portrait')
     if (typeof window !== 'undefined') {
@@ -585,6 +651,18 @@ export default {
     if (typeof document !== 'undefined' && this._onVisibilityChange) {
       document.removeEventListener('visibilitychange', this._onVisibilityChange)
       this._onVisibilityChange = null
+    }
+    // 清理息屏恢复相关监听与 RAF
+    if (this._rafId && typeof window !== 'undefined' && window.cancelAnimationFrame) {
+      cancelAnimationFrame(this._rafId)
+      this._rafId = null
+    }
+    if (this._blurTimer) { clearTimeout(this._blurTimer); this._blurTimer = null }
+    if (typeof window !== 'undefined') {
+      if (this._onPageShow) { window.removeEventListener('pageshow', this._onPageShow); this._onPageShow = null }
+      if (this._onPageHide) { window.removeEventListener('pagehide', this._onPageHide); this._onPageHide = null }
+      if (this._onWinFocus) { window.removeEventListener('focus', this._onWinFocus); this._onWinFocus = null }
+      if (this._onWinBlur) { window.removeEventListener('blur', this._onWinBlur); this._onWinBlur = null }
     }
   },
   updated() {
@@ -623,7 +701,10 @@ export default {
     }
   },
   onUnload() {
-    this.destroyHls()
+    // 0) 清 hide 延迟销毁 timer，避免销毁顺序异常
+    if (this._hideDestroyTimer) { clearTimeout(this._hideDestroyTimer); this._hideDestroyTimer = null }
+    // 1) 彻底停声 + 销毁 HLS/video（兜底：beforeUnmount 已经做过，这里再做一次，防止 App 端 onUnload 是唯一触发）
+    try { this._hardStopPlayback('onUnload') } catch (_) {}
     // 离开页面时强制恢复竖屏
     this._nativeSetOrientation('portrait')
     if (typeof window !== 'undefined') {
@@ -636,22 +717,69 @@ export default {
       document.removeEventListener('visibilitychange', this._onVisibilityChange)
       this._onVisibilityChange = null
     }
+    // 清理息屏恢复相关监听与 RAF
+    if (this._rafId && typeof window !== 'undefined' && window.cancelAnimationFrame) {
+      cancelAnimationFrame(this._rafId)
+      this._rafId = null
+    }
+    if (this._blurTimer) { clearTimeout(this._blurTimer); this._blurTimer = null }
+    if (typeof window !== 'undefined') {
+      if (this._onPageShow) { window.removeEventListener('pageshow', this._onPageShow); this._onPageShow = null }
+      if (this._onPageHide) { window.removeEventListener('pagehide', this._onPageHide); this._onPageHide = null }
+      if (this._onWinFocus) { window.removeEventListener('focus', this._onWinFocus); this._onWinFocus = null }
+      if (this._onWinBlur) { window.removeEventListener('blur', this._onWinBlur); this._onWinBlur = null }
+    }
   },
   onHide() {
-    // 页面被覆盖（跳转其他页面）：记录播放状态后销毁，onShow 时重建恢复
+    // 页面级 hide：通知 tracker 这可能是真实导航（若 3s 内有 suspend 则推翻）
+    if (this._suspendTracker) this._suspendTracker.onHide()
+    // 立即把当前播放进度+状态写盘（息屏 / 跳转 / 切后台都要保存，双重保险）
+    try { this._persistPosition(true) } catch (_) {}
+    // 内存里也保留一份（页面未被销毁时，onShow 可以直接用）
     this._wasPlayingBeforeHide = this.isPlaying
     this._resumeTime = this.currentTime || 0
     this._suspendedByHide = true
-    this.destroyHls()
+
+    // ⚠️ 核心修复：区分「息屏挂起」与「真实离开页面」
+    //   - 息屏挂起：onHide 后 700ms 内会触发 onShow（亮屏）→ 保留播放器内存
+    //   - 真实离开：onHide 后 700ms 内无 onShow（页面被 navigateBack/switchTab 卸载）→ 销毁 + 停声
+    if (this._hideDestroyTimer) clearTimeout(this._hideDestroyTimer)
+    this._hideDestroyTimer = setTimeout(() => {
+      this._hideDestroyTimer = null
+      // 700ms 到了还没被取消 → 认为是真实离开页面，彻底销毁播放器停声音
+      // （如果之后才 onUnload，onUnload 会再兜底 destroy，不会重复）
+      this._hardStopPlayback('onHide-timeout')
+    }, 700)
   },
   onShow() {
-    // 从其他页面返回：如果 onHide 销毁了播放器，重建并恢复到之前的进度
+    // 1) 有 hide→show 的延迟销毁 timer → 取消 → 保留 HLS/video 在内存（息屏亮屏场景）
+    if (this._hideDestroyTimer) {
+      clearTimeout(this._hideDestroyTimer)
+      this._hideDestroyTimer = null
+    }
+
+    // 2) 息屏 / 切后台回来 → 什么都不重建：video+HLS 仍在内存，可见性监听器里的 RAF 心跳
+    //    已经在 _markActive 中恢复播放。这里直接跳过，避免重新 m3u8 解析 + 重新请求 manifest。
+    if (this._suspendTracker && this._suspendTracker.shouldSkip()) return
+
+    // 3) 真实页面跳转回来（或 OS 杀了页面导致重启）：若 onHide 标记了 suspended，重建播放器
     if (this._suspendedByHide) {
       this._suspendedByHide = false
       const wasPlaying = this._wasPlayingBeforeHide
-      const resumeTime = this._resumeTime || 0
+      let resumeTime = this._resumeTime || 0
       this._wasPlayingBeforeHide = false
       this._resumeTime = 0
+      // 兜底：如果内存里没有 resumeTime，再从本地 storage 里读（系统杀进程 / 页面重载时用到）
+      if (!resumeTime || resumeTime <= 1) {
+        const key = this._persistKeyForPos()
+        const saved = loadPlaybackPos(key)
+        if (saved && saved.pos > 0) {
+          resumeTime = saved.pos
+          if (saved.speed && saved.speed > 0) {
+            this.currentSpeed = saved.speed
+          }
+        }
+      }
       // 重置 resolved 标志，强制重新解析（避免复用已失效的地址）
       this._resolved = false
       this._pendingResumeTime = resumeTime
@@ -664,6 +792,36 @@ export default {
     }
   },
   methods: {
+    // ========= 播放进度持久化辅助（每 5s 写盘一次 + 关键事件强制写盘） =========
+    _persistKeyForPos() {
+      const ep = this.episodes[this.currentEpIdx] || null
+      return {
+        site: this.siteKey || 'ffzy',
+        vodId: this.vodId || '',
+        epIdx: this.currentEpIdx || 0,
+        url: this.rawUrl || (ep && ep.url) || ''
+      }
+    },
+    /**
+     * 把当前播放进度写入本地存储
+     * @param {boolean} force true=立刻写盘（用于息屏/跳转等关键事件）；false=5s 节流
+     */
+    _persistPosition(force = false) {
+      const t = this.currentTime || (this._h5Video && this._h5Video.currentTime) || 0
+      if (!t || t <= 1.0) return     // 小于 1 秒不写，避免覆盖正常从头看
+      const now = Date.now()
+      if (!force && now - this._posPersistTs < 5000) return
+      this._posPersistTs = now
+      const key = this._persistKeyForPos()
+      if (!key.vodId && !key.url) return
+      savePlaybackPos(key, t, {
+        duration: this.duration || (this._h5Video && this._h5Video.duration) || 0,
+        title: this.playTitle || this.headerTitle || '',
+        poster: this.poster || (this.detail && this.detail.cover) || '',
+        speed: this.currentSpeed || 1.0,
+        muted: this.isMuted || !!(this._h5Video && this._h5Video.muted)
+      })
+    },
     _isDirectUrl(url) {
       if (!url) return false
       return /\.(m3u8|mp4|flv|ts|mov|mkv|avi|webm)(\?|#|$)/i.test(url)
@@ -1113,9 +1271,15 @@ export default {
         this._historyDebounce = setTimeout(() => this._savePlayHistory(), 1500)
       })
       video.addEventListener('pause', () => { this.isPlaying = false })
-      video.addEventListener('ratechange', () => {})
+      video.addEventListener('ratechange', () => {
+        this.currentSpeed = video.playbackRate || 1.0
+        // 用户改了倍速，也顺手写入持久化（下次播放用同一倍速）
+        this._persistPosition(false)
+      })
       // 播完自动播放下一集（ended 事件在 HLS.js 暂停/恢复后可能不触发，作兜底）
       video.addEventListener('ended', () => {
+        // 先把当前进度清掉（正常看完不希望下次再回到这个位置继续）
+        try { clearPlaybackPos(this._persistKeyForPos()) } catch (_) {}
         this._autoPlayNext()
       })
       // 进度条：监听时间/时长/缓冲
@@ -1123,9 +1287,16 @@ export default {
       video.addEventListener('timeupdate', () => {
         if (!this._seeking) this.currentTime = video.currentTime || 0
         this._checkEndedAutoNext()
+        // 每 5 秒写一次播放进度（节流内由 _persistPosition 自己控制）
+        this._persistPosition(false)
       })
       video.addEventListener('loadedmetadata', () => {
         this.duration = video.duration || 0
+        // 同步恢复倍速（防止 HLS 重挂或浏览器默认改回放速率）
+        try {
+          const rate = this.currentSpeed || 1.0
+          if (rate > 0 && video.playbackRate !== rate) video.playbackRate = rate
+        } catch (e) {}
         // 动作片：根据视频方向自动切换布局
         // 横向视频(width > height) → 电影模式；竖向视频(height > width) → 短剧模式
         if (this.contentType === 'action' && !this._orientationDetected) {
@@ -1147,13 +1318,25 @@ export default {
             this.$forceUpdate()
           }
         }
-        // 从其他页面返回时恢复到之前的播放进度
+        // 从其他页面返回 / 息屏重载时，恢复到之前的播放进度（内存优先；storage 已在 startPlayUrl 里填到 _pendingResumeTime）
         if (this._pendingResumeTime && this._pendingResumeTime > 1) {
-          try {
-            video.currentTime = this._pendingResumeTime
-          } catch (e) {}
+          const target = this._pendingResumeTime
           this._pendingResumeTime = 0
+          try {
+            video.currentTime = target
+          } catch (e) {
+            // 某些浏览器 metadata 刚就绪时 seek 会被丢弃，稍后再做一次兜底
+            setTimeout(() => {
+              const v = this._h5Video
+              if (v && target > 1) { try { v.currentTime = target } catch (_) {} }
+            }, 300)
+          }
         }
+      })
+      // seek 完成后：更新当前时间 + 立即持久化一次（确保 seek 后的位置即使立刻息屏也能保留）
+      video.addEventListener('seeked', () => {
+        this.currentTime = video.currentTime || 0
+        this._persistPosition(true)
       })
       video.addEventListener('durationchange', () => {
         this.duration = video.duration || 0
@@ -1251,7 +1434,25 @@ export default {
       this.loading = true
       this.loadingText = '加载中…'
       this.errMsg = ''
-      // 重置进度条
+      // 1) 在重置进度之前，先尝试从本地 storage 恢复这一集的播放进度（兜底）
+      //    当内存里已经有 _pendingResumeTime（真实 onHide → onShow 流程）时，尊重内存值
+      if (!this._pendingResumeTime || this._pendingResumeTime <= 1) {
+        const epObj = this.episodes[this.currentEpIdx] || null
+        const saved = loadPlaybackPos({
+          site: this.siteKey || 'ffzy',
+          vodId: this.vodId || '',
+          epIdx: this.currentEpIdx || 0,
+          url: this.rawUrl || url || (epObj && epObj.url) || ''
+        })
+        if (saved && saved.pos > 0) {
+          this._pendingResumeTime = saved.pos
+          // 顺便恢复用户上次使用的倍速（用户习惯）
+          if (saved.speed && saved.speed > 0) {
+            this.currentSpeed = saved.speed
+          }
+        }
+      }
+      // 2) 重置 UI 进度显示（显示层；真实恢复靠 _pendingResumeTime + loadedmetadata 的 seek）
       this.currentTime = 0
       this.duration = 0
       this.buffered = 0
@@ -1435,24 +1636,65 @@ export default {
       })
     },
     destroyHls() {
-      if (this._hls) {
-        try { this._hls.destroy() } catch (e) {}
-        this._hls = null
-      }
-      if (this._h5Video) {
-        if (this._h5Video.parentNode) {
-          this._h5Video.parentNode.removeChild(this._h5Video)
+      // 【兼容老调用】直接调用 destroyHls 的地方也保证声音立刻停
+      this._hardStopPlayback('destroyHls-call')
+    },
+    // 【核心停声函数】按「静音→暂停→解挂→拆实例→移除 DOM」的顺序严格执行，保证 0 漏网音频
+    _hardStopPlayback(reason /* 仅用于调试日志 */) {
+      // 1) 先暂停 isPlaying 的 UI 展示（避免 destroy 过程中状态不同步）
+      this.isPlaying = false
+      this.needTapPlay = false
+
+      // 2) 【最关键】video 元素：先 muted=true 让声音 0 延迟消失，再 pause / remove src / removeChild
+      //    顺序很重要：有的 Android WebView 在 HLS 未 stopLoad 时 video.pause() 会挂，必须先 mute 兜底
+      const v = this._h5Video
+      if (v) {
+        try { v.muted = true } catch (_) {}
+        try { v.volume = 0 } catch (_) {}
+        try { v.pause() } catch (_) {}
+        // 清空 src：防止 iOS 在 detached 后仍继续从缓冲中取音视频数据解码（iOS 特有 bug）
+        try {
+          // HLS.js 挂着 src 时直接清空会抛 AbortError，忽略即可
+          if (v.removeAttribute) v.removeAttribute('src')
+          try { v.src = '' } catch (_) {}
+          try { v.load && v.load() } catch (_) {}
+        } catch (_) {}
+        // 从 DOM 中移除：保证即使 timer 还没结束也不会在页面外被看到
+        if (v.parentNode) {
+          try { v.parentNode.removeChild(v) } catch (_) {}
         }
-        this._h5Video = null
       }
+
+      // 3) HLS 实例：按规范 stopLoad → recoverMediaError → detachMedia → destroy
+      //    顺序不能反：HLS.js 如果先 destroy，内部会保留请求引用，继续推音频帧给已经 mute 的 video
+      const h = this._hls
+      if (h) {
+        try { h.stopLoad() } catch (_) {}
+        try { h.recoverMediaError && h.recoverMediaError() } catch (_) {}
+        try { h.detachMedia() } catch (_) {}
+        try { h.destroy() } catch (_) {}
+      }
+      this._hls = null
+      this._h5Video = null
+
+      // 4) 清理相关的 timer：history debounce、延迟销毁、blur 定时器
+      if (this._historyDebounce) { clearTimeout(this._historyDebounce); this._historyDebounce = null }
+      if (this._hideDestroyTimer) { clearTimeout(this._hideDestroyTimer); this._hideDestroyTimer = null }
     },
     // 息屏亮屏后恢复播放（video 元素仍在，只是被 WebView 暂停了）
     _resumePlayback() {
       const v = this._h5Video
       if (!v) {
-        // video 已被销毁（onHide 触发了 destroyHls），需要重建
+        // video 已被销毁（真实 navigateBack 后又 forward 的极端情况）：需要重建
         if (this.rawUrl || (this.vodId && this.episodes.length)) {
-          this._pendingResumeTime = this.currentTime || 0
+          // 用 storage 中的进度做最后兜底（内存的 currentTime 可能已经丢了）
+          if (!this.currentTime || this.currentTime <= 1) {
+            const saved = loadPlaybackPos(this._persistKeyForPos())
+            if (saved && saved.pos > 0) this._pendingResumeTime = saved.pos
+            else this._pendingResumeTime = 0
+          } else {
+            this._pendingResumeTime = this.currentTime || 0
+          }
           this._pendingAutoPlay = true
           this._resolved = false
           if (this.vodId && this.episodes.length) {
@@ -1463,19 +1705,57 @@ export default {
         }
         return
       }
-      // video 元素还在，直接恢复播放
-      // HLS 长时间暂停后可能缓冲过期，先尝试 play，失败则重新加载
-      const tryPlay = () => {
-        v.play().catch((err) => {
-          // 自动播放被浏览器策略阻止，显示点击播放按钮
+      // -------------------------------------------------------
+      // video 元素还在：**首选不重新加载任何东西，直接继续 play**
+      // 因为我们 onHide 里不再 destroy，video.currentTime / 已解码缓冲都保留。
+      // 只有当 play 失败时才尝试恢复 HLS/startLoad。
+      // -------------------------------------------------------
+      try {
+        // 先恢复倍速（某些移动端 WebView 息屏可能重置 playbackRate）
+        const rate = this.currentSpeed || 1.0
+        if (rate > 0 && v.playbackRate !== rate) v.playbackRate = rate
+      } catch (_) {}
+      const desiredPos = (v.currentTime || 0) > 1 ? v.currentTime : (this.currentTime || 0)
+      const doPlay = () => {
+        const p = v.play()
+        if (!p || typeof p.then !== 'function') return
+        p.then(() => {
+          // 恢复成功
+          this.needTapPlay = false
+          this.isPlaying = true
+        }).catch((err) => {
+          // 自动播放被浏览器策略阻止：提示点击播放
           if (err && (err.name === 'NotAllowedError' || err.name === 'AbortError')) {
             this.needTapPlay = true
             this.isPlaying = false
             return
           }
-          // 其它错误（如缓冲过期）：尝试从当前位置重新加载
+          // 其他错误 → 缓冲过期 / HLS 网络错误 / Media decode 错误
           if (this._hls) {
-            try { this._hls.startLoad(v.currentTime || 0) } catch (e) {}
+            try {
+              // 先尝试恢复（MEDIA_ERROR），再从当前时间点重新请求分片
+              this._hls.recoverMediaError && this._hls.recoverMediaError()
+              // startLoad(startPosition) 传秒数，HLS.js v1 支持 -1=继续，正数=从该秒开始
+              const startAt = desiredPos > 1 ? desiredPos : -1
+              this._hls.startLoad(startAt)
+            } catch (e) { /* 已尽力，不行再降级到重建播放器 */ }
+            v.play().then(() => {
+              // 如果 startLoad 切到了一个片段前但当前 currentTime 不是 desiredPos，
+              // 再手动 seek 回 desiredPos（确保回到息屏前那一秒）
+              if (desiredPos > 1 && Math.abs((v.currentTime || 0) - desiredPos) > 2.0) {
+                try { v.currentTime = desiredPos } catch (_) {}
+              }
+            }).catch(() => {
+              // 最后手段：完全重建 HLS 从头 + seek 到 desiredPos
+              this._pendingResumeTime = desiredPos || 0
+              this._pendingAutoPlay = true
+              this._resolved = false
+              if (this.vodId && this.episodes.length) this.playEpisode(this.currentEpIdx)
+              else if (this.rawUrl) this.startPlayUrl(this.rawUrl)
+            })
+          } else {
+            // iOS 原生 HLS 无 HLS.js：play 失败先 seek 回 desiredPos 再试
+            if (desiredPos > 1) { try { v.currentTime = desiredPos } catch (_) {} }
             v.play().catch(() => {
               this.needTapPlay = true
               this.isPlaying = false
@@ -1483,7 +1763,7 @@ export default {
           }
         })
       }
-      tryPlay()
+      doPlay()
     },
     selectEpisode(i) {
       if (i === this.currentEpIdx) {

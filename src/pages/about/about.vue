@@ -191,9 +191,7 @@ export default {
         uni.showToast({ title: '已解锁动作片', icon: 'none' })
       } else if (this.versionTapCount < 5) {
         const remain = 5 - this.versionTapCount
-        if (remain <= 2) {
-          uni.showToast({ title: `再点${remain}次解锁`, icon: 'none', duration: 800 })
-        }
+        uni.showToast({ title: `再点${remain}次解锁`, icon: 'none', duration: 800 })
       }
     },
     /** 进入动作片列表页 */

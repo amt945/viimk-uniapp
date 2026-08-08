@@ -124,7 +124,8 @@ import {
   fetchSearchHotWords,
   fetchOnlineSearch,
   fetchShortsSearch,
-  navigateToPlayer
+  navigateToPlayer,
+  usePageSuspendTracker
 } from '@/api/index.js'
 
 const TABS = [
@@ -135,6 +136,9 @@ const TABS = [
 export default {
   name: 'Search',
   components: { StatusBar, VmkIcon },
+  created() {
+    this._suspendTracker = usePageSuspendTracker(this, 'SearchPage')
+  },
   data() {
     return {
       keyword: '',
@@ -152,7 +156,12 @@ export default {
       return this.tabs[this.tabIdx] || {}
     }
   },
+  onHide() {
+    if (this._suspendTracker) this._suspendTracker.onHide()
+  },
   async onShow() {
+    // 息屏/切后台回来 → 不重新拉热搜词，保留当前搜索结果
+    if (this._suspendTracker && this._suspendTracker.shouldSkip()) return
     this.hotWords = await fetchSearchHotWords()
   },
   methods: {

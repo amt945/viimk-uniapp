@@ -86,11 +86,14 @@
 <script>
 import StatusBar from '@/components/StatusBar.vue'
 import VmkIcon from '@/components/VmkIcon.vue'
-import { fetchActionList } from '@/api/index.js'
+import { fetchActionList, usePageSuspendTracker } from '@/api/index.js'
 
 export default {
   name: 'Action',
   components: { StatusBar, VmkIcon },
+  created() {
+    this._suspendTracker = usePageSuspendTracker(this, 'ActionPage')
+  },
   data() {
     return {
       loading: true,
@@ -103,7 +106,12 @@ export default {
       errMsg: ''
     }
   },
+  onHide() {
+    if (this._suspendTracker) this._suspendTracker.onHide()
+  },
   async onShow() {
+    // 息屏/切后台回来 → 不重新加载
+    if (this.initialized && this._suspendTracker && this._suspendTracker.shouldSkip()) return
     if (!this.initialized) {
       if (this._restoreFromStorage()) {
         this.initialized = true

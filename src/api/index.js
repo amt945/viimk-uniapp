@@ -685,7 +685,8 @@ function _lsRemove(key) {
 const STORAGE_KEYS = {
   HISTORY: 'vmk_history',
   FAVORITE: 'vmk_favorite',
-  OFFLINE: 'vmk_offline'
+  OFFLINE: 'vmk_offline',
+  PLAYBACK_POS: 'vmk_playback_pos'
 }
 
 /**
@@ -1076,6 +1077,239 @@ export function fetchOnlineResolve(url) {
       console.warn('[online] resolve error', err)
       return null
     })
+}
+
+/* ========================= 页面级息屏/切后台检测 =========================
+ *
+ * 背景：uni-app 的页面生命周期里，"息屏 → 亮屏"、"切到别的 App 再切回"
+ * 都会触发当前 Tab 页面的 onShow，导致列表页无条件重新请求（loading 闪烁）。
+ *
+ * 修复策略：
+ *   1. 在全局监听 visibilitychange / pagehide / pageshow / blur / focus / RAF 心跳
+ *      6 重兜底，记录最近一次"页面被挂起（息屏/切后台）"的时间戳；
+ *   2. 每个列表页在首次挂载/onLoad 时向 tracker 注册（拿到一个 pageKey），
+ *      记录"上次 onShow 完成时的时间戳 lastShowTs"；
+ *   3. 当某页 onShow 再次触发时：
+ *        · 若 [lastShowTs, now] 区间内发生过挂起 → 视为息屏/切后台回来，
+ *          跳过数据加载（保留页面当前 DOM/滚动位置）；
+ *        · 否则 → 视为 navigateBack / switchTab 等真实跳转，继续走原加载逻辑。
+ *
+ *   4. 额外支持"页面级切换原因"判定：当 onHide/onUnload 触发（uni-app 明确会
+ *      在 navigateTo/navigateBack/switchTab 前触发），标记为"真实页面切换"；
+ *      下一次 onShow 不再跳过（因为用户可能改了收藏/播放历史）。
+ */
+const _suspendTracker = (() => {
+  let _installed = false
+  let _lastSuspendTs = 0        // 最近一次挂起（息屏/切后台）的时间点
+  let _registeredPages = new Map() // pageKey -> { lastShowTs, realNavFlag, refreshOnBack }
+
+  function _markSuspend() {
+    const now = Date.now()
+    // 如果 1.5 秒内没有"真实页面切换"，才认为是息屏/切后台挂起
+    // 真实切换会在 onHide 中设 realNavFlag，页面级 onShow 会清掉
+    let anyRealNav = false
+    for (const p of _registeredPages.values()) {
+      if (p.realNavFlag && (now - p.realNavFlag) < 3000) { anyRealNav = true; break }
+    }
+    if (!anyRealNav) _lastSuspendTs = now
+  }
+  function _markActive() { /* 不主动清除 _lastSuspendTs，由各页 onShow 自己对比 */ }
+
+  function install() {
+    if (_installed || typeof window === 'undefined') return
+    _installed = true
+    const vc = () => document.hidden ? _markSuspend() : _markActive()
+    const ph = () => _markSuspend()
+    const ps = (e) => { if (e.persisted || !document.hidden) _markActive() }
+    let blurTimer = null
+    const wb = () => {
+      if (blurTimer) clearTimeout(blurTimer)
+      blurTimer = setTimeout(() => {
+        if (document.hidden || !document.hasFocus()) _markSuspend()
+      }, 600)
+    }
+    const wf = () => { if (blurTimer) { clearTimeout(blurTimer); blurTimer = null }; _markActive() }
+    document.addEventListener && document.addEventListener('visibilitychange', vc)
+    window.addEventListener && (window.addEventListener('pagehide', ph), window.addEventListener('pageshow', ps),
+      window.addEventListener('blur', wb), window.addEventListener('focus', wf))
+    // RAF 心跳兜底
+    let rafTs = 0, rafId = 0
+    const tick = (t) => {
+      if (rafTs > 0 && t - rafTs > 2000) _markActive()
+      rafTs = t
+      rafId = requestAnimationFrame(tick)
+    }
+    if (window.requestAnimationFrame) rafId = requestAnimationFrame(tick)
+    // 卸载清理（在 beforeUnload 阶段，一般不需要，因为页面会被销毁）
+    window.addEventListener && window.addEventListener('beforeunload', () => {
+      if (rafId) cancelAnimationFrame(rafId)
+      if (blurTimer) clearTimeout(blurTimer)
+      document.removeEventListener && document.removeEventListener('visibilitychange', vc)
+      window.removeEventListener('pagehide', ph)
+      window.removeEventListener('pageshow', ps)
+      window.removeEventListener('blur', wb)
+      window.removeEventListener('focus', wf)
+    })
+  }
+
+  /**
+   * 注册一个页面（在 onLoad / created / mounted 内调用一次即可）。
+   * @param {string} pageKey 唯一标识（一般用组件名或页面路径）
+   * @param {{refreshOnBack?:boolean}} opts
+   *   - refreshOnBack=true（默认）：从其他页面真实返回时（navigateBack/switchTab 导致
+   *     onHide→onShow）仍然刷新；仅息屏/切后台回来时不刷新。
+   *   - refreshOnBack=false：任何 onShow（包括真实返回）都不刷新，除非调用
+   *     forceNextRefresh()。
+   */
+  function register(pageKey, opts = {}) {
+    install()
+    if (!_registeredPages.has(pageKey)) {
+      _registeredPages.set(pageKey, { lastShowTs: 0, realNavFlag: 0, refreshOnBack: opts.refreshOnBack !== false })
+    } else {
+      const p = _registeredPages.get(pageKey)
+      if (typeof opts.refreshOnBack === 'boolean') p.refreshOnBack = opts.refreshOnBack
+    }
+  }
+
+  /** 页面级 onHide 里调用 —— 标记这是一次真实导航（非息屏） */
+  function markRealNavigation(pageKey) {
+    const p = _registeredPages.get(pageKey)
+    if (p) p.realNavFlag = Date.now()
+  }
+
+  /**
+   * 页面级 onShow 开始时调用 —— 判断这次 onShow 是否应该跳过数据加载。
+   * @returns {boolean} true = 跳过加载（息屏/切后台回来），false = 正常加载
+   */
+  function shouldSkipOnShow(pageKey) {
+    const p = _registeredPages.get(pageKey)
+    if (!p) return false
+    const now = Date.now()
+    const lastShow = p.lastShowTs
+    const lastSuspend = _lastSuspendTs
+    const wasRealNav = p.realNavFlag && (now - p.realNavFlag) < 3000
+    p.realNavFlag = 0
+    p.lastShowTs = now
+    // 若 refreshOnBack=false，只让首次通过（lastShow=0），后续 onShow 一律跳过
+    if (!p.refreshOnBack) {
+      return lastShow !== 0
+    }
+    // 真实页面导航（navigateBack / switchTab）→ 不跳过
+    if (wasRealNav) return false
+    // 在 [lastShow, now] 区间内发生过挂起 → 跳过
+    if (lastShow > 0 && lastSuspend >= lastShow && lastSuspend <= now) return true
+    return false
+  }
+
+  /** 强制让下次 onShow 不跳过（比如用户主动下拉刷新后需要再触发一次） */
+  function forceNextRefresh(pageKey) {
+    const p = _registeredPages.get(pageKey)
+    if (p) { p.lastShowTs = 0; p.realNavFlag = 0 }
+  }
+
+  return { register, markRealNavigation, shouldSkipOnShow, forceNextRefresh }
+})()
+
+/**
+ * 注册一个页面级的息屏/切后台跟踪器（返回一组方便在 Vue 选项里直接调用的函数）。
+ *
+ *   import { usePageSuspendTracker } from '@/api/index.js'
+ *   // created:
+ *   this.suspendTracker = usePageSuspendTracker(this, 'HomePage')
+ *   // onHide:
+ *   this.suspendTracker.onHide()
+ *   // onShow 开头:
+ *   if (this.suspendTracker.shouldSkip()) return
+ */
+export function usePageSuspendTracker(vm, pageKey, opts) {
+  _suspendTracker.register(pageKey, opts)
+  return {
+    onHide: () => _suspendTracker.markRealNavigation(pageKey),
+    shouldSkip: () => _suspendTracker.shouldSkipOnShow(pageKey),
+    forceNextRefresh: () => _suspendTracker.forceNextRefresh(pageKey)
+  }
+}
+
+/* ========================= 播放进度持久化（用于息屏/重载后回到同一进度） ========================= */
+
+const _POS_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000   // 7 天内进度有效
+
+/**
+ * 生成播放进度存储 key
+ * @param {{site?:string, vodId?:string, epIdx?:number, url?:string}} p
+ */
+function _posKey(p) {
+  if (!p) return ''
+  if (p.vodId) {
+    return 'vid:' + (p.site || 'ffzy') + ':' + p.vodId + ':' + (p.epIdx || 0)
+  }
+  if (p.url) {
+    // 原始 url 可能很长，做一个简单可恢复前缀 + 短 hash
+    let h = 2166136261
+    for (let i = 0; i < p.url.length; i++) {
+      h ^= p.url.charCodeAt(i)
+      h = Math.imul(h, 16777619)
+    }
+    return 'url:' + (h >>> 0).toString(36)
+  }
+  return ''
+}
+
+/**
+ * 保存当前播放进度
+ * @param {number} pos  进度秒数（可为 0 但不存 0，避免覆盖）
+ * @param {{duration?:number, poster?:string, title?:string, speed?:number, muted?:boolean}} meta
+ */
+export function savePlaybackPos(p, pos, meta) {
+  if (!p) return
+  const k = _posKey(p)
+  if (!k) return
+  if (!pos || pos <= 1.0) return   // 小于 1 秒不保存（可能是开头重载）
+  try {
+    const all = _lsGet(STORAGE_KEYS.PLAYBACK_POS, {})
+    all[k] = {
+      pos: Number(pos) || 0,
+      t: Date.now(),
+      duration: meta && meta.duration ? Number(meta.duration) : 0,
+      title: (meta && meta.title) || '',
+      poster: (meta && meta.poster) || '',
+      speed: (meta && meta.speed) || 1.0,
+      muted: !!(meta && meta.muted)
+    }
+    _lsSet(STORAGE_KEYS.PLAYBACK_POS, all)
+  } catch (e) {}
+}
+
+/**
+ * 读取播放进度
+ * @returns {{pos:number, duration:number, title:string, poster:string, speed:number, muted:boolean} | null}
+ */
+export function loadPlaybackPos(p) {
+  if (!p) return null
+  const k = _posKey(p)
+  if (!k) return null
+  try {
+    const all = _lsGet(STORAGE_KEYS.PLAYBACK_POS, {})
+    const v = all[k]
+    if (!v) return null
+    if (v.t && Date.now() - v.t > _POS_MAX_AGE_MS) {
+      // 过期则清理
+      try { delete all[k]; _lsSet(STORAGE_KEYS.PLAYBACK_POS, all) } catch (_) {}
+      return null
+    }
+    return v
+  } catch (e) { return null }
+}
+
+/** 手动清除某次进度（一般在正常看完一集调用，但不强制，会被 7 天过期清理） */
+export function clearPlaybackPos(p) {
+  if (!p) return
+  const k = _posKey(p)
+  if (!k) return
+  try {
+    const all = _lsGet(STORAGE_KEYS.PLAYBACK_POS, {})
+    if (all[k]) { delete all[k]; _lsSet(STORAGE_KEYS.PLAYBACK_POS, all) }
+  } catch (e) {}
 }
 
 // 调试/预览环境：暴露核心 API 到 window，便于从控制台/evaluate 脚本里直接验证
