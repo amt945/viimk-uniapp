@@ -215,10 +215,10 @@
       <!-- 视频区控制层（叠加在 1/3 视频上） -->
       <view class="movie-video-controls"
         @tap.stop="onPageTap"
-        @touchstart.stop="onMovieVideoTouchStart"
-        @touchmove.stop="onMovieVideoTouchMove"
-        @touchend.stop="onMovieVideoTouchEnd"
-        @touchcancel.stop="onMovieVideoTouchEnd"
+        @touchstart="onMovieVideoTouchStart"
+        @touchmove.stop.prevent="onMovieVideoTouchMove"
+        @touchend="onMovieVideoTouchEnd"
+        @touchcancel="onMovieVideoTouchEnd"
       >
         <!-- 顶部栏：返回 + 标题 + 收藏 + 更多 -->
         <view class="movie-top-bar" :style="{ paddingTop: statusBarHeight + 'px' }" v-if="showTopBar">
@@ -495,6 +495,16 @@ export default {
     // 接入页面级息屏/切后台跟踪器：息屏返回时跳过 onShow 重建播放器
     this._suspendTracker = usePageSuspendTracker(this, 'PlayerPage', { refreshOnBack: true })
   },
+  watch: {
+    isPlaying(val) {
+      // 备份机制：play/pause 事件可能不触发（某些 WebView），watch 确保自动隐藏/显示
+      if (val) {
+        this._showControls(3000)
+      } else {
+        this._showControls(0)
+      }
+    }
+  },
   computed: {
     isShorts() {
       return this.contentType === 'shorts'
@@ -616,10 +626,9 @@ export default {
       window.addEventListener('focus', this._onWinFocus)
       window.addEventListener('blur', this._onWinBlur)
     }
-    // 兜底3：RAF 心跳 —— Android WebView 息屏后 requestAnimationFrame 会暂停，
+    // 兜底3：RAF 心跳 —— Android WebView / iOS Safari 息屏后 requestAnimationFrame 会暂停，
     //        亮屏后第一个 RAF tick 即可触发恢复（最可靠的息屏检测）
     this._rafLastTs = 0
-    this._rafSuspendedFlag = false
     this._rafTick = (ts) => {
       if (this._rafLastTs === 0) {
         this._rafLastTs = ts
@@ -627,6 +636,18 @@ export default {
         // 间隔超过 2 秒未触发 RAF，认为发生过息屏/挂起
         const gap = ts - this._rafLastTs
         if (gap > 2000) {
+          // iOS Safari 息屏时 visibilitychange 可能不触发，_suspended 可能为 false
+          // 手动补上暂停状态标记，确保 _markActive 能正确恢复播放
+          if (!this._suspended) {
+            this._suspended = true
+            this._wasPlayingBeforeHidden = this.isPlaying
+            const v = this._h5Video
+            if (v && !v.paused) {
+              try { v.pause() } catch (e) {}
+            }
+            // 保存当前进度到本地存储
+            try { this._persistPosition(true) } catch (_) {}
+          }
           this._markActive()
         }
       }
@@ -1295,26 +1316,22 @@ export default {
       const fit = this.isShorts ? 'cover' : 'contain'
       video.style.cssText = 'width:100%;height:100%;object-fit:' + fit + ';background:#000;'
       if (this.poster) video.poster = this.poster
-      video.addEventListener('click', (e) => {
-        // 阻止冒泡到 .player-page 的 @tap="onPageTap"，否则 onPageTap 会被调用两次
-        // （第一次显示控制栏，第二次冒泡又立刻隐藏）
-        e.stopPropagation()
+      video.addEventListener('click', () => {
         // 上下滑动换集后会触发 click，这里抑制掉
         if (this._swipeSuppress) {
           this._swipeSuppress = false
           return
         }
+        // 首次点击解除静音（autoplay 策略导致初始静音）
         if (video.muted) {
           video.muted = false
           this.isMuted = false
           this.mutedAuto = false
           video.play().catch(() => {})
-          // 解除静音后显示控制栏并启动自动隐藏计时
-          this._showControls(this.isPlaying ? 3000 : 0)
-        } else {
-          // 统一走 onPageTap 的逻辑：显示 ↔ 隐藏 控制层
-          this.onPageTap()
         }
+        // 不调用 e.stopPropagation()，让 click 自然冒泡到父元素的 @tap="onPageTap"
+        // 电影模式：.movie-video-controls @tap.stop="onPageTap" 拦截处理
+        // 短剧模式：.player-page @tap="onPageTap" 冒泡处理
       })
       video.addEventListener('play', () => {
         this.isPlaying = true
