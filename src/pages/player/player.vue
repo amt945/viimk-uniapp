@@ -55,18 +55,18 @@
 
       <!-- 顶部控制栏（参考电影播放器） -->
       <view v-if="showTopBar" class="shorts-top-bar" :style="{ paddingTop: statusBarHeight + 'px' }" @tap.stop>
-        <view class="shorts-top-btn" @tap="goBack">
+        <view class="shorts-top-btn" @tap.stop="goBack">
           <VmkIcon name="chevron-left" :size="44" color="#FFFFFF" />
         </view>
-        <view class="shorts-top-info">
+        <view class="shorts-top-info" @tap.stop>
           <text class="shorts-top-title ellipsis">{{ headerTitle }}</text>
           <text class="shorts-top-sub" v-if="detail && detail.remarks">{{ detail.remarks }}</text>
         </view>
         <view class="shorts-top-actions">
-          <view class="shorts-top-btn" @tap="toggleFavorite">
+          <view class="shorts-top-btn" @tap.stop="toggleFavorite">
             <VmkIcon :name="isFavorited ? 'star-filled' : 'star'" :size="36" :color="isFavorited ? '#FFB800' : '#FFFFFF'" />
           </view>
-          <view class="shorts-top-btn" @tap="openMoreMenu">
+          <view class="shorts-top-btn" @tap.stop="openMoreMenu">
             <VmkIcon name="more" :size="36" color="#FFFFFF" />
           </view>
         </view>
@@ -74,36 +74,36 @@
 
       <!-- 中央：暂停时显示大播放按钮 -->
       <view v-if="!isPlaying || showCenterControl" class="shorts-center-overlay" @tap.stop>
-        <view v-if="showCenterControl || !isPlaying" class="shorts-center-play-btn" @tap="togglePlay">
+        <view v-if="showCenterControl || !isPlaying" class="shorts-center-play-btn" @tap.stop="togglePlay">
           <VmkIcon :name="isPlaying ? 'pause' : 'play'" :size="72" color="#FFFFFF" />
         </view>
       </view>
 
       <!-- 底部控制栏：播放/暂停 + 时间 + 进度条 + 静音 + 倍速 + 全屏（参考电影播放器） -->
       <view class="shorts-control-bar" v-if="showTopBar && !loading && !errMsg" @tap.stop>
-        <view class="shorts-ctrl-btn" @tap="togglePlay">
+        <view class="shorts-ctrl-btn" @tap.stop="togglePlay">
           <VmkIcon :name="isPlaying ? 'pause' : 'play'" :size="28" color="#FFFFFF" />
         </view>
-        <text class="shorts-ctrl-time">{{ currentTimeStr }}</text>
+        <text class="shorts-ctrl-time" @tap.stop>{{ currentTimeStr }}</text>
         <view
           class="shorts-progress-track"
-          @tap="onSeekProgress"
-          @touchstart="onSeekStart"
-          @touchmove.prevent="onSeekMove"
-          @touchend="onSeekEnd"
+          @tap.stop="onSeekProgress"
+          @touchstart.stop="onSeekStart"
+          @touchmove.stop.prevent="onSeekMove"
+          @touchend.stop="onSeekEnd"
         >
           <view class="progress-buffered" :style="{ width: bufferedPercent + '%' }"></view>
           <view class="progress-played" :style="{ width: playedPercent + '%' }"></view>
           <view class="progress-thumb" :style="{ left: playedPercent + '%' }"></view>
         </view>
-        <text class="shorts-ctrl-time">{{ durationStr }}</text>
-        <view class="shorts-ctrl-btn" @tap="toggleMute">
+        <text class="shorts-ctrl-time" @tap.stop>{{ durationStr }}</text>
+        <view class="shorts-ctrl-btn" @tap.stop="toggleMute">
           <VmkIcon :name="isMuted ? 'volume-off' : 'volume-2'" :size="24" color="#FFFFFF" />
         </view>
-        <view class="shorts-ctrl-btn" @tap="openSpeedMenu">
+        <view class="shorts-ctrl-btn" @tap.stop="openSpeedMenu">
           <text class="shorts-ctrl-speed">{{ currentSpeed }}x</text>
         </view>
-        <view class="shorts-ctrl-btn" @tap="toggleFullscreen">
+        <view class="shorts-ctrl-btn" @tap.stop="toggleFullscreen">
           <VmkIcon :name="isFullscreen ? 'minimize' : 'expand'" :size="24" color="#FFFFFF" />
         </view>
       </view>
@@ -222,17 +222,17 @@
       >
         <!-- 顶部栏：返回 + 标题 + 收藏 + 更多 -->
         <view class="movie-top-bar" :style="{ paddingTop: statusBarHeight + 'px' }" v-if="showTopBar">
-          <view class="top-btn" @tap="goBack">
+          <view class="top-btn" @tap.stop="goBack">
             <VmkIcon name="chevron-left" :size="44" color="#FFFFFF" />
           </view>
-          <view class="top-title-wrap">
+          <view class="top-title-wrap" @tap.stop>
             <text class="top-title ellipsis">{{ headerTitle }}</text>
           </view>
           <view class="top-actions">
-            <view class="top-btn" @tap="toggleFavorite">
+            <view class="top-btn" @tap.stop="toggleFavorite">
               <VmkIcon :name="isFavorited ? 'star-filled' : 'star'" :size="36" :color="isFavorited ? '#FFB800' : '#FFFFFF'" />
             </view>
-            <view class="top-btn" @tap="openMoreMenu">
+            <view class="top-btn" @tap.stop="openMoreMenu">
               <VmkIcon name="more" :size="36" color="#FFFFFF" />
             </view>
           </view>
@@ -240,7 +240,7 @@
 
         <!-- 中央：暂停时显示大播放按钮 -->
         <view v-if="!isPlaying || showCenterControl" class="movie-center-overlay">
-          <view v-if="showCenterControl || !isPlaying" class="movie-center-play-btn" @tap="togglePlay">
+          <view v-if="showCenterControl || !isPlaying" class="movie-center-play-btn" @tap.stop="togglePlay">
             <VmkIcon :name="isPlaying ? 'pause' : 'play'" :size="72" color="#FFFFFF" />
           </view>
         </view>
@@ -257,31 +257,31 @@
         </view>
 
         <!-- 底部控制栏：播放/暂停 + 时间 + 进度条 + 倍速 + 静音 + 全屏 -->
-        <view class="movie-bottom-bar" v-if="showTopBar && !loading && !errMsg">
-          <view class="movie-bottom-btn" @tap="togglePlay">
+        <view class="movie-bottom-bar" v-if="showTopBar && !loading && !errMsg" @tap.stop>
+          <view class="movie-bottom-btn" @tap.stop="togglePlay">
             <VmkIcon :name="isPlaying ? 'pause' : 'play'" :size="28" color="#FFFFFF" />
           </view>
-          <text class="movie-bottom-time">{{ currentTimeStr }}</text>
+          <text class="movie-bottom-time" @tap.stop>{{ currentTimeStr }}</text>
           <view
             class="movie-progress-track"
             ref="progressTrack"
-            @tap="onSeekProgress"
-            @touchstart="onSeekStart"
-            @touchmove.prevent="onSeekMove"
-            @touchend="onSeekEnd"
+            @tap.stop="onSeekProgress"
+            @touchstart.stop="onSeekStart"
+            @touchmove.stop.prevent="onSeekMove"
+            @touchend.stop="onSeekEnd"
           >
             <view class="progress-buffered" :style="{ width: bufferedPercent + '%' }"></view>
             <view class="progress-played" :style="{ width: playedPercent + '%' }"></view>
             <view class="progress-thumb" :style="{ left: playedPercent + '%' }"></view>
           </view>
-          <text class="movie-bottom-time">{{ durationStr }}</text>
-          <view class="movie-bottom-btn" @tap="toggleMute">
+          <text class="movie-bottom-time" @tap.stop>{{ durationStr }}</text>
+          <view class="movie-bottom-btn" @tap.stop="toggleMute">
             <VmkIcon :name="isMuted ? 'volume-off' : 'volume-2'" :size="24" color="#FFFFFF" />
           </view>
-          <view class="movie-bottom-btn" @tap="openSpeedMenu">
+          <view class="movie-bottom-btn" @tap.stop="openSpeedMenu">
             <text class="movie-bottom-speed">{{ currentSpeed }}x</text>
           </view>
-          <view class="movie-bottom-btn" @tap="toggleFullscreen">
+          <view class="movie-bottom-btn" @tap.stop="toggleFullscreen">
             <VmkIcon :name="isFullscreen ? 'minimize' : 'expand'" :size="24" color="#FFFFFF" />
           </view>
         </view>
