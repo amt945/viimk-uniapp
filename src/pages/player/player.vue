@@ -1,7 +1,7 @@
 <template>
   <view
     class="player-page"
-    :class="{ 'shorts-mode': isShorts, 'movie-mode': !isShorts, 'fs-active': isFullscreen }"
+    :class="{ 'shorts-mode': isShorts, 'movie-mode': !isShorts, 'fs-active': isFullscreen, 'css-landscape': cssLandscape }"
     @tap="onPageTap"
     @touchstart="onTouchStart"
     @touchmove="onTouchMove"
@@ -466,6 +466,7 @@ export default {
       needTapPlay: false,
       isPlaying: false,
       isFullscreen: false,
+      cssLandscape: false,
       showTopBar: true,
       showCenterControl: false,
       showPanel: false,
@@ -550,6 +551,7 @@ export default {
       this._onNativeExitFs = () => {
         if (this.isFullscreen) {
           this.isFullscreen = false
+          this.cssLandscape = false
           this.showTopBar = true
         }
       }
@@ -953,20 +955,24 @@ export default {
       this._mvTouchStartTime = null
       // 没有明显移动 → 视为点击，交给 tap 处理（控制栏显隐）
       if (!this._mvTouchMoved) return
-      // 必须以垂直滑动为主
-      const isVertical = Math.abs(dy) > Math.abs(dx)
-      if (!isVertical) return
+      // CSS 横屏旋转后，物理左右滑动对应原来的上下滑动
+      const rot = this.cssLandscape
+      const primary = rot ? Math.abs(dx) : Math.abs(dy)
+      const secondary = rot ? Math.abs(dy) : Math.abs(dx)
+      const primaryVal = rot ? dx : dy
+      // 必须以主轴滑动为主
+      if (primary <= secondary) return
       const SWIPE_THRESHOLD = 60
       const SWIPE_VELOCITY = 0.5
-      const fast = dt > 0 && (Math.abs(dy) / dt) >= SWIPE_VELOCITY
-      if (Math.abs(dy) < SWIPE_THRESHOLD && !fast) return
+      const fast = dt > 0 && (Math.abs(primaryVal) / dt) >= SWIPE_VELOCITY
+      if (Math.abs(primaryVal) < SWIPE_THRESHOLD && !fast) return
       if (this.showPanel || this.showSpeedMenu || this.showMoreMenu) return
       // 抑制紧随其后的 tap
       this._swipeSuppress = true
-      if (dy < 0) {
-        this._swipeEpisode(1)   // 上滑 → 下一集
+      if (primaryVal < 0) {
+        this._swipeEpisode(1)   // 上滑/左滑 → 下一集
       } else {
-        this._swipeEpisode(-1)  // 下滑 → 上一集
+        this._swipeEpisode(-1)  // 下滑/右滑 → 上一集
       }
     },
     // ================ 短剧模式：上下滑动换集 ================
@@ -1056,14 +1062,26 @@ export default {
       // H5 端 ref 是 DOM 元素
       const el = trackEl.$el || trackEl
       const rect = el.getBoundingClientRect()
-      let x = 0
       const touch = (e.touches && e.touches[0]) || (e.changedTouches && e.changedTouches[0])
-      if (touch && typeof touch.clientX === 'number') {
-        x = touch.clientX
-      } else if (e.detail && typeof e.detail.x === 'number') {
-        x = e.detail.x
+      let ratio
+      // CSS 横屏旋转后进度条变成竖直方向，用 Y 坐标计算
+      if (this.cssLandscape) {
+        let y = 0
+        if (touch && typeof touch.clientY === 'number') {
+          y = touch.clientY
+        } else if (e.detail && typeof e.detail.y === 'number') {
+          y = e.detail.y
+        }
+        ratio = Math.max(0, Math.min(1, (y - rect.top) / rect.height))
+      } else {
+        let x = 0
+        if (touch && typeof touch.clientX === 'number') {
+          x = touch.clientX
+        } else if (e.detail && typeof e.detail.x === 'number') {
+          x = e.detail.x
+        }
+        ratio = Math.max(0, Math.min(1, (x - rect.left) / rect.width))
       }
-      const ratio = Math.max(0, Math.min(1, (x - rect.left) / rect.width))
       v.currentTime = ratio * this.duration
       this.currentTime = v.currentTime
     },
@@ -1091,9 +1109,12 @@ export default {
       this.showTopBar = true
       if (!this.isShorts) {
         if (this.isFullscreen) {
-          this._nativeSetOrientation('landscape')
+          // 尝试原生横屏；失败（如 iOS Safari）则用 CSS rotate 模拟
+          const ok = this._nativeSetOrientation('landscape')
+          this.cssLandscape = !ok
         } else {
           this._nativeSetOrientation('portrait')
+          this.cssLandscape = false
         }
       }
     },
@@ -1102,13 +1123,13 @@ export default {
      */
     _nativeSetOrientation(orientation) {
       const o = orientation || 'portrait'
-      if (typeof window === 'undefined') return
+      if (typeof window === 'undefined') return false
       // 1) 原生桥：VIIMKAppBridge.setOrientation
       const bridge = window.VIIMKAppBridge
       if (bridge && typeof bridge.setOrientation === 'function') {
         try {
           bridge.setOrientation(o)
-          return
+          return true
         } catch (e) {
           console.warn('[player] bridge.setOrientation failed:', e)
         }
@@ -1121,7 +1142,7 @@ export default {
         } else {
           plus.screen.lockOrientation('portrait-primary')
         }
-        return
+        return true
       } catch (_) {}
       // #endif
       // 3) 浏览器端尝试 screen.orientation.lock（需在用户手势里，且移动端多数浏览器不支持，忽略）
@@ -1134,8 +1155,10 @@ export default {
             unspecified: 'any'
           }
           scr.orientation.lock(map[o] || 'any').catch(() => {})
+          return true
         }
       } catch (_) {}
+      return false
     },
     toggleMute() {
       const v = this._h5Video
@@ -1945,6 +1968,37 @@ export default {
   padding-right: calc(24rpx + env(safe-area-inset-right));
   padding-top: calc(env(safe-area-inset-top));
   height: calc(88rpx + env(safe-area-inset-top));
+}
+
+/* ================ CSS 模拟横屏（iOS Safari 等不支持 screen.orientation.lock 的浏览器） ================ */
+/* 旋转 90° 后宽高互换：宽度=屏幕高，高度=屏幕宽 */
+.player-page.movie-mode.fs-active.css-landscape .video-bg,
+.player-page.movie-mode.fs-active.css-landscape .movie-video-controls {
+  position: fixed;
+  width: 100vh;
+  width: 100dvh;
+  height: 100vw;
+  height: 100dvw;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%) rotate(90deg);
+  transform-origin: center center;
+}
+/* CSS 横屏时控制层 z-index 仍高于视频 */
+.player-page.movie-mode.fs-active.css-landscape .movie-video-controls {
+  z-index: 10000;
+}
+/* CSS 横屏时顶部栏 / 底部栏的安全区域适配（旋转后原 top→right，原 bottom→left） */
+.player-page.movie-mode.fs-active.css-landscape .movie-top-bar {
+  padding-top: 24rpx;
+  padding-right: calc(env(safe-area-inset-top) + 24rpx);
+  padding-left: 24rpx;
+  height: 88rpx;
+}
+.player-page.movie-mode.fs-active.css-landscape .movie-bottom-bar {
+  padding-left: 24rpx;
+  padding-right: 24rpx;
+  padding-bottom: calc(env(safe-area-inset-top) + 16rpx);
 }
 
 /* ================ 电影/电视剧视频控制层（叠加在 1/3 视频上） ================ */
