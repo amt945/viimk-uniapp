@@ -214,16 +214,13 @@
 
     <!-- ========== 电影/电视剧布局（1/3 视频 + 控制栏叠加 + 底部选集栏 + 弹出面板） ========== -->
     <template v-else>
-      <!-- 电影模式不需要全屏捕获层：movie-video-controls 和 movie-info-area 各自处理自己的空白底点击 -->
-      <!-- 视频区控制层（叠加在 1/3 视频上）：空白底点击 → onPageTap，滑动 → 换集；
-           touchmove 不在模板层 preventDefault，避免轻微抖动也破坏 tap 合成，改为 JS 里判断明显滑动时才 e.preventDefault() -->
-      <view class="movie-video-controls"
-        @tap.stop="onPageTap"
-        @touchstart="onMovieVideoTouchStart"
-        @touchmove.stop="onMovieVideoTouchMove"
-        @touchend="onMovieVideoTouchEnd"
-        @touchcancel="onMovieVideoTouchEnd"
-      >
+      <!-- 与短剧模式完全一致的事件分层：
+           1) ctrl-capture-layer(z=40) 只绑 @tap.stop 吃"空白底点击切换控制栏显隐"，不绑任何 touch 事件，保证 tap 合成稳定
+           2) 滑动换集检测走根节点 @touchstart/move/end（与短剧同一入口，纯被动标记移动量，从不 preventDefault，不破坏 click 合成）
+           3) movie-video-controls 壳自身 pointer-events:none（不吃事件），仅作为顶栏/底栏/中央按钮定位容器；
+              每个子元素单独 pointer-events:auto（顶栏 z=55、底栏 z=55、中央按钮 z=55，均高于捕获层 40）-->
+      <view class="ctrl-capture-layer" @tap.stop="onPageTap"></view>
+      <view class="movie-video-controls">
         <!-- 顶部栏：返回 + 标题 + 收藏 + 更多 -->
         <view class="movie-top-bar" :style="{ paddingTop: statusBarHeight + 'px' }" v-if="showTopBar">
           <view class="top-btn" @tap.stop="goBack">
@@ -291,8 +288,8 @@
         </view>
       </view>
 
-      <!-- 内容区（视频下方，默认展开，不遮挡播放器）：空白底点击 → onPageTap（交给 onPageTap 判断显示/隐藏） -->
-      <view class="movie-info-area" @tap.stop="onPageTap">
+      <!-- 内容区（视频下方，默认展开，不遮挡播放器）：空白底点击 → 由上层 ctrl-capture-layer 统一处理控制栏显隐 -->
+      <view class="movie-info-area">
         <!-- Tab 栏 -->
         <view class="movie-info-tabs">
           <view
@@ -985,111 +982,88 @@ export default {
       this.closeMoreMenu()
       await this.toggleFavorite()
     },
-    // ================ 电影/电视剧模式：视频区上下滑动换集 ================
-    // 仅在 1/3 视频区域内生效，不影响下方内容区滚动
-    onMovieVideoTouchStart(e) {
-      const t = (e.touches && e.touches[0]) || (e.changedTouches && e.changedTouches[0])
-      if (!t) return
-      this._mvTouchStartX = t.clientX
-      this._mvTouchStartY = t.clientY
-      this._mvTouchStartTime = Date.now()
-      this._mvTouchMoved = false
-    },
-    onMovieVideoTouchMove(e) {
-      const t = (e.touches && e.touches[0]) || (e.changedTouches && e.changedTouches[0])
-      if (!t || this._mvTouchStartY == null) return
-      const dy = t.clientY - this._mvTouchStartY
-      const dx = t.clientX - this._mvTouchStartX
-      // 只有明显超过微抖动阈值（>10px）才算移动，避免轻微滑动破坏 tap 合成
-      if (Math.abs(dy) > 10 || Math.abs(dx) > 10) {
-        this._mvTouchMoved = true
-        // 不调用 e.preventDefault()：Android WebView 中 preventDefault 会阻止 click 合成，
-        // 导致播放按钮 @tap 无法触发。改用 CSS touch-action: none 阻止页面滚动。
-      }
-    },
-    onMovieVideoTouchEnd(e) {
-      if (this._mvTouchStartY == null) return
-      const t = (e.changedTouches && e.changedTouches[0]) || (e.touches && e.touches[0])
-      const endY = t ? t.clientY : this._mvTouchStartY
-      const endX = t ? t.clientX : this._mvTouchStartX
-      const dy = endY - this._mvTouchStartY
-      const dx = endX - this._mvTouchStartX
-      const dt = Date.now() - (this._mvTouchStartTime || 0)
-      this._mvTouchStartY = null
-      this._mvTouchStartX = null
-      this._mvTouchStartTime = null
-      // 没有明显移动 → 视为点击，交给 tap 处理（控制栏显隐）
-      if (!this._mvTouchMoved) return
-      // CSS 横屏旋转后，物理左右滑动对应原来的上下滑动
-      const rot = this.cssLandscape
-      const primary = rot ? Math.abs(dx) : Math.abs(dy)
-      const secondary = rot ? Math.abs(dy) : Math.abs(dx)
-      const primaryVal = rot ? dx : dy
-      // 必须以主轴滑动为主
-      if (primary <= secondary) return
-      const SWIPE_THRESHOLD = 60
-      const SWIPE_VELOCITY = 0.5
-      const fast = dt > 0 && (Math.abs(primaryVal) / dt) >= SWIPE_VELOCITY
-      if (Math.abs(primaryVal) < SWIPE_THRESHOLD && !fast) return
-      if (this.showPanel || this.showSpeedMenu || this.showMoreMenu) return
-      // 抑制紧随其后的 tap
-      this._swipeSuppress = true
-      if (primaryVal < 0) {
-        this._swipeEpisode(1)   // 上滑/左滑 → 下一集
-      } else {
-        this._swipeEpisode(-1)  // 下滑/右滑 → 上一集
-      }
-    },
-    // ================ 短剧模式：上下滑动换集 ================
+    // ================ 短剧 / 电影 共用：根节点统一处理上下滑动换集 ================
+    // 【关键】根节点级 touch 只做"被动记录移动量"，从不 stop、从不 preventDefault，
+    //        保证浏览器合成 click/tap 不被打断；控制栏切换由 ctrl-capture-layer 的 @tap.stop 单独处理。
     onTouchStart(e) {
-      if (!this.isShorts) return
       const t = (e.touches && e.touches[0]) || (e.changedTouches && e.changedTouches[0])
       if (!t) return
-      this._touchStartX = t.clientX
-      this._touchStartY = t.clientY
-      this._touchStartTime = Date.now()
-      this._touchMoved = false
+      if (this.isShorts) {
+        this._touchStartX = t.clientX
+        this._touchStartY = t.clientY
+        this._touchStartTime = Date.now()
+        this._touchMoved = false
+      } else {
+        this._mvTouchStartX = t.clientX
+        this._mvTouchStartY = t.clientY
+        this._mvTouchStartTime = Date.now()
+        this._mvTouchMoved = false
+      }
     },
     onTouchMove(e) {
-      if (!this.isShorts) return
       const t = (e.touches && e.touches[0]) || (e.changedTouches && e.changedTouches[0])
-      if (!t || this._touchStartY == null) return
-      const dy = t.clientY - this._touchStartY
-      const dx = t.clientX - this._touchStartX
-      // 标记是否发生过明显移动（用于区分点击与滑动）
-      if (Math.abs(dy) > 10 || Math.abs(dx) > 10) this._touchMoved = true
+      if (!t) return
+      if (this.isShorts) {
+        if (this._touchStartY == null) return
+        const dy = t.clientY - this._touchStartY
+        const dx = t.clientX - this._touchStartX
+        if (Math.abs(dy) > 10 || Math.abs(dx) > 10) this._touchMoved = true
+      } else {
+        if (this._mvTouchStartY == null) return
+        const dy = t.clientY - this._mvTouchStartY
+        const dx = t.clientX - this._mvTouchStartX
+        // 电影模式支持 CSS 横屏旋转后的左右滑动，一样只做标记不 preventDefault
+        if (Math.abs(dy) > 10 || Math.abs(dx) > 10) this._mvTouchMoved = true
+      }
     },
     onTouchEnd(e) {
-      if (!this.isShorts) return
-      if (this._touchStartY == null) return
       const t = (e.changedTouches && e.changedTouches[0]) || (e.touches && e.touches[0])
-      const endY = t ? t.clientY : this._touchStartY
-      const endX = t ? t.clientX : this._touchStartX
-      const dy = endY - this._touchStartY
-      const dx = endX - this._touchStartX
-      const dt = Date.now() - (this._touchStartTime || 0)
-      this._touchStartY = null
-      this._touchStartX = null
-      this._touchStartTime = null
-      // 没有明显移动 → 视为点击，交给 onPageTap 处理
-      if (!this._touchMoved) return
-      // 必须以垂直滑动为主（|dy| > |dx|），且超过阈值或速度足够快
-      const SWIPE_THRESHOLD = 60 // 像素
-      const SWIPE_VELOCITY = 0.5  // px/ms
-      const isVertical = Math.abs(dy) > Math.abs(dx)
-      if (!isVertical) return
-      const fast = dt > 0 && (Math.abs(dy) / dt) >= SWIPE_VELOCITY
-      if (Math.abs(dy) < SWIPE_THRESHOLD && !fast) return
-      // 面板打开时不切集（避免误触）
-      if (this.showPanel || this.showSpeedMenu || this.showMoreMenu) return
-      // 抑制紧随其后的 tap 事件（避免误触顶栏）
-      this._swipeSuppress = true
-      if (dy < 0) {
-        // 上滑 → 下一集
-        this._swipeEpisode(1)
+      if (this.isShorts) {
+        if (this._touchStartY == null) return
+        const endY = t ? t.clientY : this._touchStartY
+        const endX = t ? t.clientX : this._touchStartX
+        const dy = endY - this._touchStartY
+        const dx = endX - this._touchStartX
+        const dt = Date.now() - (this._touchStartTime || 0)
+        this._touchStartY = null
+        this._touchStartX = null
+        this._touchStartTime = null
+        if (!this._touchMoved) return
+        const SWIPE_THRESHOLD = 60
+        const SWIPE_VELOCITY = 0.5
+        const isVertical = Math.abs(dy) > Math.abs(dx)
+        if (!isVertical) return
+        const fast = dt > 0 && (Math.abs(dy) / dt) >= SWIPE_VELOCITY
+        if (Math.abs(dy) < SWIPE_THRESHOLD && !fast) return
+        if (this.showPanel || this.showSpeedMenu || this.showMoreMenu) return
+        this._swipeSuppress = true
+        if (dy < 0) this._swipeEpisode(1)
+        else this._swipeEpisode(-1)
       } else {
-        // 下滑 → 上一集
-        this._swipeEpisode(-1)
+        if (this._mvTouchStartY == null) return
+        const endY = t ? t.clientY : this._mvTouchStartY
+        const endX = t ? t.clientX : this._mvTouchStartX
+        const dy = endY - this._mvTouchStartY
+        const dx = endX - this._mvTouchStartX
+        const dt = Date.now() - (this._mvTouchStartTime || 0)
+        this._mvTouchStartY = null
+        this._mvTouchStartX = null
+        this._mvTouchStartTime = null
+        if (!this._mvTouchMoved) return
+        // CSS 横屏旋转后，物理左右滑动对应原来的上下滑动
+        const rot = this.cssLandscape
+        const primary = rot ? Math.abs(dx) : Math.abs(dy)
+        const secondary = rot ? Math.abs(dy) : Math.abs(dx)
+        const primaryVal = rot ? dx : dy
+        if (primary <= secondary) return
+        const SWIPE_THRESHOLD = 60
+        const SWIPE_VELOCITY = 0.5
+        const fast = dt > 0 && (Math.abs(primaryVal) / dt) >= SWIPE_VELOCITY
+        if (Math.abs(primaryVal) < SWIPE_THRESHOLD && !fast) return
+        if (this.showPanel || this.showSpeedMenu || this.showMoreMenu) return
+        this._swipeSuppress = true
+        if (primaryVal < 0) this._swipeEpisode(1)
+        else this._swipeEpisode(-1)
       }
     },
     _swipeEpisode(dir) {
@@ -2102,9 +2076,9 @@ export default {
   height: 33.3333vh;
   z-index: 45;
   overflow: hidden;
-  /* 用 touch-action 代替 JS preventDefault 阻止页面滚动，
-     避免 preventDefault 破坏 click 合成导致播放按钮点不动 */
-  touch-action: none;
+  /* 壳自身不吃任何事件，让空白底点击透传到下层 ctrl-capture-layer(z=40) 去触发 onPageTap；
+     每个可交互子元素单独 pointer-events:auto，确保按钮点击不会漏 */
+  pointer-events: none;
 }
 
 /* 顶部栏（叠加在视频上，带渐变背景） */
@@ -2120,6 +2094,7 @@ export default {
   padding: 0 24rpx;
   background: linear-gradient(180deg, rgba(0,0,0,0.75) 0%, transparent 100%);
   z-index: 55;
+  pointer-events: auto;
 }
 
 /* 中央叠加层：暂停时大按钮，播放时集数信息 */
@@ -2196,6 +2171,7 @@ export default {
   gap: 10rpx;
   background: linear-gradient(0deg, rgba(0,0,0,0.75) 0%, transparent 100%);
   z-index: 55;
+  pointer-events: auto;
 }
 .movie-bottom-btn {
   width: 64rpx;
