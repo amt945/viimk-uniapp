@@ -271,7 +271,7 @@
             ref="progressTrack"
             @tap.stop="onSeekProgress"
             @touchstart.stop="onSeekStart"
-            @touchmove.stop.prevent="onSeekMove"
+            @touchmove.stop="onSeekMove"
             @touchend.stop="onSeekEnd"
           >
             <view class="progress-buffered" :style="{ width: bufferedPercent + '%' }"></view>
@@ -1003,10 +1003,8 @@ export default {
       // 只有明显超过微抖动阈值（>10px）才算移动，避免轻微滑动破坏 tap 合成
       if (Math.abs(dy) > 10 || Math.abs(dx) > 10) {
         this._mvTouchMoved = true
-        // 明显滑动 → 才 preventDefault，阻止页面滚动 + 保留后续 touchend 换集
-        if (e && typeof e.preventDefault === 'function') {
-          try { e.preventDefault() } catch (_) {}
-        }
+        // 不调用 e.preventDefault()：Android WebView 中 preventDefault 会阻止 click 合成，
+        // 导致播放按钮 @tap 无法触发。改用 CSS touch-action: none 阻止页面滚动。
       }
     },
     onMovieVideoTouchEnd(e) {
@@ -2104,6 +2102,9 @@ export default {
   height: 33.3333vh;
   z-index: 45;
   overflow: hidden;
+  /* 用 touch-action 代替 JS preventDefault 阻止页面滚动，
+     避免 preventDefault 破坏 click 合成导致播放按钮点不动 */
+  touch-action: none;
 }
 
 /* 顶部栏（叠加在视频上，带渐变背景） */
