@@ -214,13 +214,13 @@
 
     <!-- ========== 电影/电视剧布局（1/3 视频 + 控制栏叠加 + 底部选集栏 + 弹出面板） ========== -->
     <template v-else>
-      <!-- 全屏透明点击捕获层：没有按钮覆盖的空白区域点击 → 切换控制栏显隐 -->
-      <view class="ctrl-capture-layer" @tap.stop="onPageTap"></view>
-      <!-- 视频区控制层（叠加在 1/3 视频上） -->
+      <!-- 电影模式不需要全屏捕获层：movie-video-controls 和 movie-info-area 各自处理自己的空白底点击 -->
+      <!-- 视频区控制层（叠加在 1/3 视频上）：空白底点击 → onPageTap，滑动 → 换集；
+           touchmove 不在模板层 preventDefault，避免轻微抖动也破坏 tap 合成，改为 JS 里判断明显滑动时才 e.preventDefault() -->
       <view class="movie-video-controls"
-        @tap="onPageTap"
+        @tap.stop="onPageTap"
         @touchstart="onMovieVideoTouchStart"
-        @touchmove.stop.prevent="onMovieVideoTouchMove"
+        @touchmove.stop="onMovieVideoTouchMove"
         @touchend="onMovieVideoTouchEnd"
         @touchcancel="onMovieVideoTouchEnd"
       >
@@ -291,8 +291,8 @@
         </view>
       </view>
 
-      <!-- 内容区（视频下方，默认展开，不遮挡播放器） -->
-      <view class="movie-info-area" @tap.stop="showTopBar = false">
+      <!-- 内容区（视频下方，默认展开，不遮挡播放器）：空白底点击 → onPageTap（交给 onPageTap 判断显示/隐藏） -->
+      <view class="movie-info-area" @tap.stop="onPageTap">
         <!-- Tab 栏 -->
         <view class="movie-info-tabs">
           <view
@@ -1000,7 +1000,14 @@ export default {
       if (!t || this._mvTouchStartY == null) return
       const dy = t.clientY - this._mvTouchStartY
       const dx = t.clientX - this._mvTouchStartX
-      if (Math.abs(dy) > 10 || Math.abs(dx) > 10) this._mvTouchMoved = true
+      // 只有明显超过微抖动阈值（>10px）才算移动，避免轻微滑动破坏 tap 合成
+      if (Math.abs(dy) > 10 || Math.abs(dx) > 10) {
+        this._mvTouchMoved = true
+        // 明显滑动 → 才 preventDefault，阻止页面滚动 + 保留后续 touchend 换集
+        if (e && typeof e.preventDefault === 'function') {
+          try { e.preventDefault() } catch (_) {}
+        }
+      }
     },
     onMovieVideoTouchEnd(e) {
       if (this._mvTouchStartY == null) return
@@ -1990,11 +1997,14 @@ export default {
 .movie-mode .video-bg {
   position: relative;
   width: 100%;
-  height: 33.3333vh; /* 占页面高度 1/3 */
+  height: 33.3333vh; /* 占页面高度 1/3，与 movie-video-controls / movie-info-area 的定位对齐 */
   flex-shrink: 0;
 }
 .movie-mode .video-el {
+  width: 100%;
   height: 100%;
+  object-fit: contain;
+  background: #000;
 }
 
 /* ================ CSS 全屏模式（兼容 Android WebView） ================ */
